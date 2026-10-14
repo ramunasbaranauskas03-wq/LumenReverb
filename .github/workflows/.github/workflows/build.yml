@@ -1,0 +1,59 @@
+name: Build Lumen Reverb
+
+on:
+  push:
+  workflow_dispatch:
+
+env:
+  SRC: LumenReverb/LumenReverb
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            name: macOS
+          - os: windows-latest
+            name: Windows
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.name }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (macOS universal)
+        if: runner.os == 'macOS'
+        run: cmake -S "$SRC" -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+
+      - name: Configure (Windows)
+        if: runner.os == 'Windows'
+        run: cmake -S "$env:SRC" -B build
+
+      - name: Build
+        run: cmake --build build --config Release --parallel 4
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          ART="build/LumenReverb_artefacts/Release"
+          mkdir -p dist
+          codesign --force --deep -s - "$ART/VST3/Lumen Reverb.vst3"
+          codesign --force --deep -s - "$ART/AU/Lumen Reverb.component"
+          cp -R "$ART/VST3/Lumen Reverb.vst3" dist/
+          cp -R "$ART/AU/Lumen Reverb.component" dist/
+          ditto -c -k --keepParent dist LumenReverb-macOS.zip
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item -Recurse "build/LumenReverb_artefacts/Release/VST3/Lumen Reverb.vst3" dist/
+          Compress-Archive -Path dist/* -DestinationPath LumenReverb-Windows.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LumenReverb-${{ matrix.name }}
+          path: LumenReverb-${{ matrix.name }}.zip
