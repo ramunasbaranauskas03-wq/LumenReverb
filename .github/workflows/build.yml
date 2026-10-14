@@ -14,6 +14,7 @@ jobs:
           - { target: LumenReverb, product: "Lumen Reverb" }
           - { target: LumenDelay,  product: "Lumen Delay" } 
           - { target: LumenCompressor, product: "Lumen Compressor" }
+          - { target: LumenPump, product: "Lumen Pump" }
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.plugin.target }} (${{ matrix.os }})
 
