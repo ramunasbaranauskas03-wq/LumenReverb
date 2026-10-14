@@ -12,9 +12,13 @@ jobs:
         os: [macos-14, windows-latest]
         plugin:
           - { target: LumenReverb, product: "Lumen Reverb" }
-          - { target: LumenDelay,  product: "Lumen Delay" } 
+          - { target: LumenDelay,  product: "Lumen Delay" }
           - { target: LumenCompressor, product: "Lumen Compressor" }
           - { target: LumenPump, product: "Lumen Pump" }
+          - { target: LumenLimiter, product: "Lumen Limiter" }
+          - { target: LumenBass, product: "Lumen Bass" }
+          - { target: LumenSaturator, product: "Lumen Saturator" }
+          - { target: LumenEQ, product: "Lumen EQ" }
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.plugin.target }} (${{ matrix.os }})
 
