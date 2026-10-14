@@ -1,27 +1,31 @@
-name: Build Lumen Reverb
+name: Build Lumen Plugins
 
 on:
   push:
   workflow_dispatch:
-
-env:
-  SRC: LumenReverb/LumenReverb
 
 jobs:
   build:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: macos-14
-            name: macOS
-          - os: windows-latest
-            name: Windows
+        os: [macos-14, windows-latest]
+        plugin:
+          - { target: LumenReverb, product: "Lumen Reverb" }
+          - { target: LumenDelay,  product: "Lumen Delay" }
     runs-on: ${{ matrix.os }}
-    name: ${{ matrix.name }}
+    name: ${{ matrix.plugin.target }} (${{ matrix.os }})
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Locate project
+        shell: bash
+        run: |
+          SRC=$(grep -rl --include=CMakeLists.txt "project(${{ matrix.plugin.target }} " . | head -1 | xargs -r dirname)
+          if [ -z "$SRC" ]; then echo "::error::${{ matrix.plugin.target }} not found in repo"; exit 1; fi
+          echo "Found project in $SRC"
+          echo "SRC=$SRC" >> "$GITHUB_ENV"
 
       - name: Configure (macOS universal)
         if: runner.os == 'macOS'
@@ -29,7 +33,8 @@ jobs:
 
       - name: Configure (Windows)
         if: runner.os == 'Windows'
-        run: cmake -S "$env:SRC" -B build
+        shell: bash
+        run: cmake -S "$SRC" -B build
 
       - name: Build
         run: cmake --build build --config Release --parallel 4
@@ -37,23 +42,24 @@ jobs:
       - name: Package (macOS)
         if: runner.os == 'macOS'
         run: |
-          ART="build/LumenReverb_artefacts/Release"
+          ART="build/${{ matrix.plugin.target }}_artefacts/Release"
           mkdir -p dist
-          codesign --force --deep -s - "$ART/VST3/Lumen Reverb.vst3"
-          codesign --force --deep -s - "$ART/AU/Lumen Reverb.component"
-          cp -R "$ART/VST3/Lumen Reverb.vst3" dist/
-          cp -R "$ART/AU/Lumen Reverb.component" dist/
-          ditto -c -k --keepParent dist LumenReverb-macOS.zip
+          codesign --force --deep -s - "$ART/VST3/${{ matrix.plugin.product }}.vst3"
+          codesign --force --deep -s - "$ART/AU/${{ matrix.plugin.product }}.component"
+          cp -R "$ART/VST3/${{ matrix.plugin.product }}.vst3" dist/
+          cp -R "$ART/AU/${{ matrix.plugin.product }}.component" dist/
+          # zip keeps the executable bits macOS bundles need
+          ditto -c -k --keepParent dist "${{ matrix.plugin.target }}-macOS.zip"
+          rm -rf dist && mkdir dist && mv "${{ matrix.plugin.target }}-macOS.zip" dist/
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item -Recurse "build/LumenReverb_artefacts/Release/VST3/Lumen Reverb.vst3" dist/
-          Compress-Archive -Path dist/* -DestinationPath LumenReverb-Windows.zip
+          Copy-Item -Recurse "build/${{ matrix.plugin.target }}_artefacts/Release/VST3/${{ matrix.plugin.product }}.vst3" dist/
 
       - uses: actions/upload-artifact@v4
         with:
-          name: LumenReverb-${{ matrix.name }}
-          path: LumenReverb-${{ matrix.name }}.zip
+          name: ${{ matrix.plugin.target }}-${{ runner.os }}
+          path: dist
