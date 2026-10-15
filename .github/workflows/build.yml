@@ -21,6 +21,7 @@ jobs:
           - { target: LumenEQ, product: "Lumen EQ" }
           - { target: LumenSynth, product: "Lumen Synth" }
           - { target: LumenReference, product: "Lumen Reference" }
+          - { target: LumenFilter, product: "Lumen Filter" }
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.plugin.target }} (${{ matrix.os }})
 
