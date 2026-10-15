@@ -23,6 +23,8 @@ jobs:
           - { target: LumenReference, product: "Lumen Reference" }
           - { target: LumenFilter, product: "Lumen Filter" }
           - { target: LumenSpaceControl, product: "Lumen Space Control" }
+          - { target: LumenTransient, product: "Lumen Transient" }
+          - { target: LumenClipper, product: "Lumen Clipper" }
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.plugin.target }} (${{ matrix.os }})
 
