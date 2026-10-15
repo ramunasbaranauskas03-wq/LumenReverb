@@ -3,44 +3,82 @@
 #include <complex>
 
 using namespace lumen::led;
+using namespace lumen::synth;
 using APVTS = juce::AudioProcessorValueTreeState;
 
 namespace
 {
 inline bool differs (float a, float b) { return std::abs (a - b) > 1.0e-7f; }
-float pv (APVTS& s, const char* id) { return s.getRawParameterValue (id)->load(); }
 float pv (APVTS& s, const juce::String& id) { return s.getRawParameterValue (id)->load(); }
+const char* oscPrefix (int o) { return o == 0 ? "a" : o == 1 ? "b" : "c"; }
+
+template <typename T, typename... Args>
+T* add (juce::Component& parent, std::vector<std::unique_ptr<juce::Component>>& owner, Args&&... args)
+{
+    auto c = std::make_unique<T> (std::forward<Args> (args)...);
+    T* raw = c.get(); parent.addAndMakeVisible (*raw); owner.push_back (std::move (c));
+    return raw;
+}
 
 //==============================================================================
-// 3D wavetable: all 16 frames stacked in depth, the current (morphed + warped) frame lit up.
-class WavetableView : public juce::Component
+// 3D wavetable display + LOAD button + WAV drag & drop
+class WavetableView : public juce::Component, public juce::FileDragAndDropTarget
 {
 public:
-    WavetableView (APVTS& s, juce::String prefix, juce::Colour c) : st (s), p (std::move (prefix)), col (c) {}
+    WavetableView (LumenSynthProcessor& p, int oscIndex, juce::Colour c) : proc (p), st (p.apvts), osc (oscIndex), pre (oscPrefix (oscIndex)), col (c)
+    {
+        load.setButtonText ("LOAD");
+        load.setColour (juce::TextButton::buttonColourId, col);
+        load.setTooltip ("Import a wavetable (Serum-style 2048-sample frames) or any audio file. You can also drag a WAV onto the display.");
+        load.onClick = [this]
+        {
+            chooser = std::make_unique<juce::FileChooser> ("Load wavetable", juce::File::getSpecialLocation (juce::File::userDocumentsDirectory), "*.wav;*.aif;*.aiff;*.flac");
+            chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+                                  [this] (const juce::FileChooser& fc) { if (fc.getResult().existsAsFile()) importFile (fc.getResult()); });
+        };
+        addAndMakeVisible (load);
+    }
+    void resized() override { load.setBounds (6, 5, 42, 16); }
     bool changed()
     {
-        const float sig = pv (st, p + "_table") * 1000.0f + pv (st, p + "_pos") * 100.0f + pv (st, p + "_warpm") * 7.0f + pv (st, p + "_warp") * 3.0f + pv (st, p + "_on");
+        const float sig = pv (st, pre + "_table") * 1000.0f + pv (st, pre + "_pos") * 100.0f + pv (st, pre + "_warpm") * 7.0f + pv (st, pre + "_warp") * 3.0f
+                          + pv (st, pre + "_on") + (float) proc.tableVersion.load() * 13.0f;
         if (! differs (sig, last)) return false;
-        last = sig; return true;
+        last = sig;
+        return true;
     }
+    bool isInterestedInFileDrag (const juce::StringArray& files) override
+    {
+        for (auto& f : files) if (f.endsWithIgnoreCase (".wav") || f.endsWithIgnoreCase (".aif") || f.endsWithIgnoreCase (".aiff") || f.endsWithIgnoreCase (".flac")) return true;
+        return false;
+    }
+    void fileDragEnter (const juce::StringArray&, int, int) override { dropHover = true; repaint(); }
+    void fileDragExit (const juce::StringArray&) override { dropHover = false; repaint(); }
+    void filesDropped (const juce::StringArray& files, int, int) override { dropHover = false; if (! files.isEmpty()) importFile (juce::File (files[0])); }
+
     void paint (juce::Graphics& g) override
     {
         auto r = getLocalBounds().toFloat();
-        const bool on = pv (st, p + "_on") > 0.5f;
+        const bool on = pv (st, pre + "_on") > 0.5f;
         lcd (g, r, col);
-        const auto& bank = lumen::WavetableBank::get();
-        const int table = (int) pv (st, p + "_table");
-        const float pos = pv (st, p + "_pos");
-        const int wm = (int) pv (st, p + "_warpm");
-        const float warp = pv (st, p + "_warp");
-        const int F = lumen::WavetableBank::kFrames, P = 72;
-        auto area = r.reduced (10.0f, 8.0f);
+        const lumen::Table* tb = proc.tableFor (osc);
+        const float pos = pv (st, pre + "_pos");
+        const int wm = (int) pv (st, pre + "_warpm");
+        const float warp = pv (st, pre + "_warp");
+        if (tb == nullptr)
+        {
+            g.setColour (col.withAlpha (0.6f)); g.setFont (font (11.0f));
+            g.drawText ("DROP A WAV HERE", r, juce::Justification::centred);
+            return;
+        }
+        const int F = tb->frames, P = 64;
+        auto area = r.reduced (8.0f, 8.0f).withTrimmedTop (8.0f);
         const float depthX = area.getWidth() * 0.22f, depthY = area.getHeight() * 0.32f;
         const float w = area.getWidth() - depthX, h = area.getHeight() - depthY;
         auto framePath = [&] (int f, float morph, bool warped)
         {
             juce::Path path;
-            const float dz = (float) f / (float) (F - 1);
+            const float dz = F > 1 ? (float) f / (float) (F - 1) : 0.0f;
             const float ox = area.getX() + depthX * (1.0f - dz), oy = area.getY() + depthY * dz;
             for (int i = 0; i <= P; ++i)
             {
@@ -52,28 +90,34 @@ public:
                         case 1: ph *= 1.0f + 7.0f * warp; ph -= std::floor (ph); break;
                         case 2: { const float a = 8.0f * warp; ph = ph * (1.0f + a) / (1.0f + a * ph); break; }
                         case 3: { const float sw = 0.5f - 0.48f * warp; ph = ph < sw ? 0.5f * ph / sw : 0.5f + 0.5f * (ph - sw) / (1.0f - sw); break; }
+                        case 5: { const float m = ph < 0.5f ? 2.0f * ph : 2.0f - 2.0f * ph; ph += warp * (m * 0.999f - ph); break; }
+                        case 6: { const float a = (2.0f * warp - 1.0f) * 8.0f;
+                                  ph = a >= 0.0f ? ph * (1.0f + a) / (1.0f + a * ph) : 1.0f - (1.0f - ph) * (1.0f - a) / (1.0f - a * (1.0f - ph)); break; }
+                        case 7: { const float q = std::exp2 (1.0f + (1.0f - warp) * 7.0f); ph = std::floor (ph * q) / q; break; }
+                        case 8: ph -= warp * 0.15f * std::sin (6.2831853f * ph); ph -= std::floor (ph); break;
                         default: break;
                     }
                 }
-                const float v = morph >= 0.0f ? bank.read (table, morph, 3, ph) : bank.frame (table, f, 3)[(int) (ph * 2047.0f)];
+                const float v = morph >= 0.0f ? tb->read (morph, 3, juce::jmin (ph, 0.9999f)) : tb->frame (f, 3)[(int) (juce::jmin (ph, 0.9999f) * 2047.0f)];
                 const float x = ox + w * (float) i / (float) P;
-                const float y = oy + h * 0.5f - v * h * 0.46f;
+                const float y = oy + h * 0.5f - juce::jlimit (-1.2f, 1.2f, v) * h * 0.46f;
                 if (i == 0) path.startNewSubPath (x, y); else path.lineTo (x, y);
             }
             return path;
         };
-        for (int f = F - 1; f >= 0; --f)
+        const int shown = juce::jmin (F, 16);
+        for (int k = shown - 1; k >= 0; --k)
         {
-            const float dist = std::abs ((float) f / (F - 1) - pos);
+            const int f = shown > 1 ? (int) std::round ((float) k * (F - 1) / (shown - 1)) : 0;
+            const float dist = std::abs ((F > 1 ? (float) f / (F - 1) : 0.0f) - pos);
             g.setColour (col.withAlpha ((on ? 0.17f : 0.07f) + (on ? 0.25f : 0.0f) * juce::jmax (0.0f, 1.0f - dist * 5.0f)));
             g.strokePath (framePath (f, -1.0f, false), juce::PathStrokeType (0.9f));
         }
-        // current frame at its depth position
         const int fcur = juce::jlimit (0, F - 1, (int) std::round (pos * (F - 1)));
         auto cur = framePath (fcur, pos, true);
         if (on)
         {
-            const float dz = (float) fcur / (float) (F - 1);
+            const float dz = F > 1 ? (float) fcur / (float) (F - 1) : 0.0f;
             const float base = area.getY() + depthY * dz + h * 0.5f;
             juce::Path fill (cur);
             fill.lineTo (area.getX() + depthX * (1.0f - dz) + w, base); fill.lineTo (area.getX() + depthX * (1.0f - dz), base); fill.closeSubPath();
@@ -82,21 +126,34 @@ public:
             glowPath (g, cur, col, 1.6f);
         }
         else glowPath (g, cur, C::dim, 1.0f, 0.5f);
-        g.setFont (font (9.5f)); g.setColour (col.withAlpha (on ? 0.7f : 0.3f));
-        g.drawText ("FRAME " + juce::String (fcur + 1) + "/16", r.reduced (8.0f, 4.0f), juce::Justification::topRight);
+        g.setFont (font (9.0f)); g.setColour (col.withAlpha (on ? 0.75f : 0.3f));
+        const bool user = (int) pv (st, pre + "_table") >= kNumFactoryTables;
+        g.drawText ((user ? juce::String (tb->name).toUpperCase().substring (0, 14) + "  " : juce::String()) + juce::String (fcur + 1) + "/" + juce::String (F),
+                    r.reduced (6.0f, 5.0f), juce::Justification::topRight);
+        if (dropHover) { g.setColour (col.withAlpha (0.25f)); g.fillRoundedRectangle (r, 5.0f); g.setColour (col); g.drawRoundedRectangle (r.reduced (1.0f), 5.0f, 2.0f); }
     }
 private:
-    APVTS& st; juce::String p; juce::Colour col; float last = -1.0f;
+    void importFile (const juce::File& f)
+    {
+        juce::String err;
+        if (! proc.loadWavetableFile (osc, f, err))
+            juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "Lumen Synth", err);
+        last = -1.0f; repaint();
+    }
+    LumenSynthProcessor& proc; APVTS& st; int osc; juce::String pre; juce::Colour col;
+    juce::TextButton load;
+    std::unique_ptr<juce::FileChooser> chooser;
+    float last = -1.0f; bool dropHover = false;
 };
 
 //==============================================================================
 class FilterView : public juce::Component
 {
 public:
-    explicit FilterView (APVTS& s) : st (s) {}
+    FilterView (APVTS& s, juce::String prefix, juce::Colour c) : st (s), p (std::move (prefix)), col (c) {}
     bool changed()
     {
-        const float sig = pv (st, "flt_type") * 7.0f + pv (st, "flt_cut") + pv (st, "flt_res") * 13.0f + pv (st, "flt_on") * 3.0f + pv (st, "flt_drive") * 5.0f;
+        const float sig = pv (st, p + "_type") * 7.0f + pv (st, p + "_cut") + pv (st, p + "_res") * 13.0f + pv (st, p + "_on") * 3.0f + pv (st, p + "_drive") * 5.0f;
         if (! differs (sig, last)) return false;
         last = sig;
         return true;
@@ -113,20 +170,50 @@ public:
         const cd den = s * s + ks * s + 1.0;
         switch (type)
         {
-            case 0:  H = (1.0 + 0.55 * k) / (std::pow (1.0 + s, 4.0) + k); break;
-            case 1:  H = 1.0 / den; break;
-            case 2:  H = 1.0 / (den * den); break;
-            case 3:  H = s * s / den; break;
-            case 4:  H = (s * s / den) * (s * s / den); break;
-            case 5:  H = ks * s / den; break;
-            default: H = (s * s + 1.0) / den; break;
+            case fLadder:  H = (1.0 + 0.55 * k) / (std::pow (1.0 + s, 4.0) + k); break;
+            case fLP12:    H = 1.0 / den; break;
+            case fLP24:    H = 1.0 / (den * den); break;
+            case fHP12:    H = s * s / den; break;
+            case fHP24:    H = (s * s / den) * (s * s / den); break;
+            case fBP:      H = ks * s / den; break;
+            case fNotch:   H = (s * s + 1.0) / den; break;
+            case fCombP: case fCombN:
+            {
+                const double g = 0.15 + 0.83 * std::sqrt (r);
+                const cd e = std::exp (cd (0.0, -2.0 * 3.141592653589793 * (double) f / std::max (25.0, (double) fc)));
+                H = (type == fCombP ? 1.0 / (1.0 - g * e) : 1.0 / (1.0 + g * e)) * std::sqrt (1.0 - g * g) * 1.4;
+                break;
+            }
+            case fFormant:
+            {
+                static const double F[5][3] = { { 800, 1150, 2900 }, { 400, 1600, 2700 }, { 270, 2100, 3000 }, { 450, 800, 2830 }, { 325, 700, 2530 } };
+                const double pos = juce::jlimit (0.0, 1.0, std::log2 (fc / 20.0) / std::log2 (1000.0)) * 4.0;
+                const int a = std::min (3, (int) pos); const double fr = pos - a;
+                const double q = 4.0 + 16.0 * r;
+                H = 0.0;
+                for (int i = 0; i < 3; ++i)
+                {
+                    const double fi = F[a][i] + (F[a + 1][i] - F[a][i]) * fr;
+                    const cd si (0.0, f / fi);
+                    H += (si / q) / (si * si + si / q + 1.0) * (i == 0 ? 1.0 : i == 1 ? 0.7 : 0.45) * 1.8;
+                }
+                break;
+            }
+            case fPhaser:
+            {
+                static const double spread[4] = { 0.55, 0.85, 1.3, 2.1 };
+                cd ap = 1.0;
+                for (double sp : spread) { const cd si (0.0, f / (fc * sp)); ap *= (1.0 - si) / (1.0 + si); }
+                H = 0.6 * (1.0 + ap / (1.0 - 0.92 * r * ap));
+                break;
+            }
+            default: H = 1.0; break;
         }
         return (float) (20.0 * std::log10 (std::abs (H) + 1e-9));
     }
     void paint (juce::Graphics& g) override
     {
         auto r = getLocalBounds().toFloat();
-        const auto col = C::amber;
         lcd (g, r, col);
         auto a = r.reduced (8.0f, 8.0f);
         dotGrid (g, a, 6.0f, col, 0.08f);
@@ -136,32 +223,32 @@ public:
             const float x = a.getX() + a.getWidth() * std::log (f / 20.0f) / std::log (1000.0f);
             g.drawVerticalLine ((int) x, a.getY(), a.getBottom());
         }
-        const bool on = pv (st, "flt_on") > 0.5f;
-        const int type = (int) pv (st, "flt_type");
-        const float fc = pv (st, "flt_cut"), res = pv (st, "flt_res");
+        const bool on = pv (st, p + "_on") > 0.5f;
+        const int type = (int) pv (st, p + "_type");
+        const float fc = pv (st, p + "_cut"), res = pv (st, p + "_res");
         auto yOf = [&] (float db) { return a.getY() + a.getHeight() * (1.0f - (juce::jlimit (-42.0f, 24.0f, db) + 42.0f) / 66.0f); };
-        juce::Path p;
-        for (int i = 0; i <= 160; ++i)
+        juce::Path path;
+        for (int i = 0; i <= 200; ++i)
         {
-            const float f = 20.0f * std::pow (1000.0f, (float) i / 160.0f);
+            const float f = 20.0f * std::pow (1000.0f, (float) i / 200.0f);
             const float db = on ? magDb (type, f, fc, res) : 0.0f;
-            const float x = a.getX() + a.getWidth() * (float) i / 160.0f;
-            if (i == 0) p.startNewSubPath (x, yOf (db)); else p.lineTo (x, yOf (db));
+            const float x = a.getX() + a.getWidth() * (float) i / 200.0f;
+            if (i == 0) path.startNewSubPath (x, yOf (db)); else path.lineTo (x, yOf (db));
         }
-        juce::Path fill (p); fill.lineTo (a.getRight(), a.getBottom()); fill.lineTo (a.getX(), a.getBottom()); fill.closeSubPath();
+        juce::Path fill (path); fill.lineTo (a.getRight(), a.getBottom()); fill.lineTo (a.getX(), a.getBottom()); fill.closeSubPath();
         juce::ColourGradient gr (col.withAlpha (on ? 0.3f : 0.08f), 0, a.getY(), col.withAlpha (0.0f), 0, a.getBottom(), false);
         g.setGradientFill (gr); g.fillPath (fill);
-        glowPath (g, p, on ? col : C::dim, 1.6f, on ? 1.0f : 0.5f);
+        glowPath (g, path, on ? col : C::dim, 1.6f, on ? 1.0f : 0.5f);
         if (on)
         {
             const float x = a.getX() + a.getWidth() * std::log (fc / 20.0f) / std::log (1000.0f);
             drawLed (g, { x, yOf (magDb (type, fc, fc, res)) }, 3.5f, juce::Colours::white.interpolatedWith (col, 0.4f), 1.0f);
         }
         g.setFont (font (9.5f)); g.setColour (col.withAlpha (0.7f));
-        g.drawText (formatValue (*lumen::synth::findSpec ("flt_cut"), fc), r.reduced (8.0f, 4.0f), juce::Justification::topRight);
+        g.drawText (formatValue (*findSpec (p + "_cut"), fc), r.reduced (8.0f, 4.0f), juce::Justification::topRight);
     }
 private:
-    APVTS& st; float last = -1.0f;
+    APVTS& st; juce::String p; juce::Colour col; float last = -1.0f;
 };
 
 //==============================================================================
@@ -190,7 +277,6 @@ public:
         const float sx = a.getWidth() / total;
         float x = a.getX();
         juce::Path pth; pth.startNewSubPath (x, a.getBottom());
-        // attack (convex), decay & release (exponential look)
         const int N = 16;
         for (int i = 1; i <= N; ++i) { const float t = (float) i / N; pth.lineTo (x + tw (A) * sx * t, a.getBottom() - a.getHeight() * (1.0f - std::pow (1.0f - t, 1.8f))); }
         x += tw (A) * sx;
@@ -203,7 +289,6 @@ public:
         juce::ColourGradient gr (col.withAlpha (0.28f), 0, a.getY(), col.withAlpha (0.0f), 0, a.getBottom(), false);
         g.setGradientFill (gr); g.fillPath (fill);
         glowPath (g, pth, col, 1.5f);
-        // LED nodes at the stage corners
         float nx = a.getX() + tw (A) * sx;
         drawLed (g, { nx, a.getY() }, 2.6f, col, 1.0f);
         nx += tw (D) * sx; drawLed (g, { nx, a.getBottom() - a.getHeight() * S }, 2.6f, col, 1.0f);
@@ -214,125 +299,172 @@ private:
 };
 
 //==============================================================================
-class LfoView : public juce::Component
+// LFO display + curve editor (Custom shape is drawable: double-click adds a point, drag moves, right-click deletes)
+class LfoEditor : public juce::Component
 {
 public:
-    LfoView (APVTS& s, LumenSynthProcessor& pr, int index, juce::Colour c) : st (s), proc (pr), l (index), col (c) {}
-    void advance (double dt)
+    LfoEditor (LumenSynthProcessor& p, int index, juce::Colour c) : proc (p), st (p.apvts), l (index), col (c)
     {
-        const juce::String p = "l" + juce::String (l) + "_";
-        const double hz = pv (st, p + "sync") > 0.5f ? proc.hostBpm.load() / 60.0 / lumen::synth::divBeats ((int) pv (st, p + "div")) : pv (st, p + "rate");
-        phase += hz * dt; phase -= std::floor (phase);
-        if (phase < lastPh) { shA = shB; shB = rnd.nextFloat() * 2.0f - 1.0f; }
-        lastPh = phase;
+        draw.setButtonText ("DRAW");
+        draw.setColour (juce::TextButton::buttonColourId, col);
+        draw.setTooltip ("Convert the current shape into editable points");
+        draw.onClick = [this] { proc.setLfoPointsFromShape (l, shape()); repaint(); };
+        addAndMakeVisible (draw);
     }
-    float value() const { return lumen::synth::lfoShape ((int) pv (st, "l" + juce::String (l) + "_shape"), (float) phase, shA, shB); }
+    void resized() override { draw.setBounds (getWidth() - 50, 5, 44, 16); }
+    int shape() const { return (int) pv (st, "l" + juce::String (l + 1) + "_shape"); }
+    float value() const
+    {
+        const float ph = proc.lfoPhase[l].load();
+        if (shape() == lCustom) { const auto cp = proc.getLfoPoints (l); return 2.0f * curveAt (cp, ph) - 1.0f; }
+        return lfoShape (shape(), ph, 0.0f, 0.5f);
+    }
+    static float curveAt (const std::vector<lumen::CurvePoint>& cp, float x)
+    {
+        for (size_t i = 0; i + 1 < cp.size(); ++i)
+            if (x <= cp[i + 1].x)
+            {
+                const float w = cp[i + 1].x - cp[i].x;
+                const float t = w > 1e-6f ? (x - cp[i].x) / w : 1.0f;
+                return cp[i].y + (cp[i + 1].y - cp[i].y) * t;
+            }
+        return cp.empty() ? 0.5f : cp.back().y;
+    }
+    juce::Rectangle<float> plot() const { return getLocalBounds().toFloat().reduced (10.0f, 12.0f).withTrimmedTop (8.0f); }
+    juce::Point<float> toScreen (lumen::CurvePoint c) const { auto a = plot(); return { a.getX() + c.x * a.getWidth(), a.getBottom() - c.y * a.getHeight() }; }
+    lumen::CurvePoint fromScreen (juce::Point<float> s) const
+    {
+        auto a = plot();
+        return { juce::jlimit (0.0f, 1.0f, (s.x - a.getX()) / a.getWidth()), juce::jlimit (0.0f, 1.0f, (a.getBottom() - s.y) / a.getHeight()) };
+    }
+    int findPoint (juce::Point<float> s) const
+    {
+        for (int i = 0; i < (int) pts.size(); ++i) if (toScreen (pts[(size_t) i]).getDistanceFrom (s) < 7.0f) return i;
+        return -1;
+    }
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        if (shape() != lCustom) return;
+        pts = proc.getLfoPoints (l);
+        drag = findPoint (e.position);
+        if (e.mods.isPopupMenu() && drag > 0 && drag < (int) pts.size() - 1) { pts.erase (pts.begin() + drag); drag = -1; proc.setLfoPoints (l, pts); repaint(); }
+    }
+    void mouseDrag (const juce::MouseEvent& e) override
+    {
+        if (shape() != lCustom || drag < 0) return;
+        auto c = fromScreen (e.position);
+        const int last = (int) pts.size() - 1;
+        if (drag == 0) c.x = 0.0f; else if (drag == last) c.x = 1.0f;
+        else c.x = juce::jlimit (pts[(size_t) drag - 1].x + 0.004f, pts[(size_t) drag + 1].x - 0.004f, c.x);
+        if (e.mods.isShiftDown()) c.y = std::round (c.y * 8.0f) / 8.0f;
+        pts[(size_t) drag] = c;
+        proc.setLfoPoints (l, pts);
+        repaint();
+    }
+    void mouseUp (const juce::MouseEvent&) override { drag = -1; }
+    void mouseDoubleClick (const juce::MouseEvent& e) override
+    {
+        if (shape() != lCustom) { proc.setLfoPointsFromShape (l, shape()); repaint(); return; }
+        pts = proc.getLfoPoints (l);
+        const int h = findPoint (e.position);
+        if (h > 0 && h < (int) pts.size() - 1) pts.erase (pts.begin() + h);
+        else if (h < 0 && pts.size() < 48) pts.push_back (fromScreen (e.position));
+        proc.setLfoPoints (l, pts);
+        repaint();
+    }
     void paint (juce::Graphics& g) override
     {
         auto r = getLocalBounds().toFloat();
         lcd (g, r, col);
-        auto a = r.reduced (10.0f, 12.0f);
-        dotGrid (g, a, 6.0f, col, 0.07f);
+        auto a = plot();
+        dotGrid (g, a, 6.0f, col, 0.08f);
         g.setColour (col.withAlpha (0.15f)); g.drawHorizontalLine ((int) a.getCentreY(), a.getX(), a.getRight());
-        const int shape = (int) pv (st, "l" + juce::String (l) + "_shape");
+        for (int k = 1; k < 4; ++k) g.drawVerticalLine ((int) (a.getX() + a.getWidth() * k / 4.0f), a.getY(), a.getBottom());
+        const int sh = shape();
+        const bool custom = sh == lCustom;
+        if (custom) pts = drag >= 0 ? pts : proc.getLfoPoints (l);
         juce::Path pth;
-        juce::Random rr (77);
-        float h0 = rr.nextFloat() * 2 - 1, h1 = rr.nextFloat() * 2 - 1;
-        const int N = 120;
+        juce::Random rr (77 + l);
+        float rv[6]; for (auto& x : rv) x = rr.nextFloat() * 2.0f - 1.0f;
+        const int N = 160;
         for (int i = 0; i <= N; ++i)
         {
-            const float ph = (float) i / N * 2.0f;          // two cycles
-            const float fr = ph - std::floor (ph);
-            if (i > 0 && fr < ((float) (i - 1) / N * 2.0f) - std::floor ((float) (i - 1) / N * 2.0f)) { h0 = h1; h1 = rr.nextFloat() * 2 - 1; }
-            const float v = lumen::synth::lfoShape (shape, juce::jmin (fr, 0.9999f), h0, h1);
-            const float x = a.getX() + a.getWidth() * (float) i / N, y = a.getCentreY() - v * a.getHeight() * 0.45f;
+            const float ph = (float) i / N;
+            float v;
+            if (custom) v = 2.0f * curveAt (pts, ph) - 1.0f;
+            else if (sh == lSH || sh == lSmooth)
+            {
+                const int seg = juce::jmin (3, (int) (ph * 4.0f));
+                v = lfoShape (sh, juce::jmin (ph * 4.0f - (float) seg, 0.9999f), rv[seg], rv[seg + 1]);
+            }
+            else v = lfoShape (sh, juce::jmin (ph, 0.9999f), 0.0f, 0.5f);
+            const float x = a.getX() + a.getWidth() * ph, y = a.getCentreY() - v * a.getHeight() * 0.5f;
             if (i == 0) pth.startNewSubPath (x, y); else pth.lineTo (x, y);
         }
+        juce::Path fill (pth); fill.lineTo (a.getRight(), a.getCentreY()); fill.lineTo (a.getX(), a.getCentreY()); fill.closeSubPath();
+        g.setColour (col.withAlpha (0.12f)); g.fillPath (fill);
         glowPath (g, pth, col, 1.5f);
+        if (custom)
+            for (int i = 0; i < (int) pts.size(); ++i)
+                drawLed (g, toScreen (pts[(size_t) i]), i == drag ? 4.2f : 3.2f, juce::Colours::white.interpolatedWith (col, 0.5f), 1.0f);
+        const float ph = proc.lfoPhase[l].load();
         const float v = value();
-        const float x = a.getX() + a.getWidth() * (float) phase * 0.5f, y = a.getCentreY() - v * a.getHeight() * 0.45f;
-        drawLed (g, { x, y }, 3.6f, juce::Colours::white.interpolatedWith (col, 0.3f), 1.0f);
-        // value bar on the right
-        auto bar = r.removeFromRight (6.0f).reduced (1.0f, 10.0f);
-        g.setColour (col.withAlpha (0.1f)); g.fillRect (bar);
-        const float bh = bar.getHeight() * 0.5f * std::abs (v);
-        g.setColour (col.withAlpha (0.8f));
-        g.fillRect (v > 0 ? bar.withTop (bar.getCentreY() - bh).withBottom (bar.getCentreY()) : bar.withTop (bar.getCentreY()).withHeight (bh));
+        drawLed (g, { a.getX() + a.getWidth() * ph, a.getCentreY() - v * a.getHeight() * 0.5f }, 3.8f, juce::Colours::white.interpolatedWith (col, 0.3f), 1.0f);
+        g.setFont (font (9.0f)); g.setColour (col.withAlpha (0.6f));
+        g.drawText (custom ? "DBL-CLICK ADD  -  RIGHT-CLICK DEL  -  SHIFT SNAP" : "DBL-CLICK TO DRAW", r.reduced (8.0f, 4.0f), juce::Justification::bottomLeft);
     }
 private:
-    APVTS& st; LumenSynthProcessor& proc; int l; juce::Colour col;
-    double phase = 0, lastPh = 0; float shA = 0, shB = 0.5f; juce::Random rnd;
+    LumenSynthProcessor& proc; APVTS& st; int l; juce::Colour col;
+    juce::TextButton draw;
+    std::vector<lumen::CurvePoint> pts;
+    int drag = -1;
 };
 
 //==============================================================================
-template <typename T, typename... Args>
-T* add (juce::Component& parent, std::vector<std::unique_ptr<juce::Component>>& owner, Args&&... args)
-{
-    auto c = std::make_unique<T> (std::forward<Args> (args)...);
-    T* raw = c.get(); parent.addAndMakeVisible (*raw); owner.push_back (std::move (c));
-    return raw;
-}
-
+//  PAGES
 //==============================================================================
 class OscPage : public Page
 {
 public:
-    OscPage (APVTS& s) : st (s)
+    OscPage (LumenSynthProcessor& p) : st (p.apvts)
     {
-        for (int o = 0; o < 2; ++o)
+        const juce::Colour cols[3] = { C::cyan, C::magenta, C::amber };
+        for (int o = 0; o < 3; ++o)
         {
-            const juce::String p = o == 0 ? "a" : "b";
-            const auto col = o == 0 ? C::cyan : C::magenta;
-            const int x0 = o * 308;
-            auto* pw = add<Toggle> (*this, owned, st, p + "_on", "", col, true); pw->setBounds (x0 + 6, 3, 20, 20);
-            add<Combo> (*this, owned, st, p + "_table", col)->setBounds (x0 + 92, 4, 118, 20);
-            add<Combo> (*this, owned, st, p + "_warpm", col)->setBounds (x0 + 214, 4, 80, 20);
-            wt[o] = add<WavetableView> (*this, owned, st, p, col); wt[o]->setBounds (x0 + 8, 30, 284, 86);
+            const juce::String pre = oscPrefix (o);
+            const auto col = cols[o];
+            const int x0 = o * 252;
+            add<Toggle> (*this, owned, st, pre + "_on", "", col, true)->setBounds (x0 + 6, 3, 20, 20);
+            add<Combo> (*this, owned, st, pre + "_table", col)->setBounds (x0 + 74, 4, 104, 20);
+            add<Combo> (*this, owned, st, pre + "_warpm", col)->setBounds (x0 + 182, 4, 62, 20);
+            wt[o] = add<WavetableView> (*this, owned, p, o, col); wt[o]->setBounds (x0 + 8, 28, 228, 82);
             const char* ids[3][4] = { { "_pos", "_warp", "_level", "_pan" }, { "_uni", "_det", "_blend", "_width" }, { "_oct", "_semi", "_fine", "_rand" } };
             const char* lbl[3][4] = { { "POSITION", "WARP", "LEVEL", "PAN" }, { "UNISON", "DETUNE", "BLEND", "WIDTH" }, { "OCTAVE", "SEMI", "FINE", "PHASE" } };
             for (int row = 0; row < 3; ++row)
                 for (int c = 0; c < 4; ++c)
                 {
-                    const juce::String id = p + ids[row][c];
+                    const juce::String id = pre + ids[row][c];
                     const bool bip = id.endsWith ("_pan") || id.endsWith ("_oct") || id.endsWith ("_semi") || id.endsWith ("_fine");
-                    add<Knob> (*this, owned, st, id, lbl[row][c], col, bip)->setBounds (x0 + 8 + c * 71, 122 + row * 96, 71, 90);
+                    add<Knob> (*this, owned, st, id, lbl[row][c], col, bip)->setBounds (x0 + 8 + c * 57, 114 + row * 99, 57, 94);
                 }
         }
-        add<Toggle> (*this, owned, st, "sub_on", "", C::violet, true)->setBounds (622, 3, 20, 20);
-        add<Combo> (*this, owned, st, "sub_shape", C::violet)->setBounds (624, 32, 116, 22);
-        add<Combo> (*this, owned, st, "sub_oct", C::violet)->setBounds (624, 60, 116, 22);
-        add<Knob> (*this, owned, st, "sub_level", "LEVEL", C::violet)->setBounds (638, 92, 88, 100);
-        add<Toggle> (*this, owned, st, "noise_on", "", C::blue, true)->setBounds (622, 211, 20, 20);
-        add<Knob> (*this, owned, st, "noise_level", "LEVEL", C::blue)->setBounds (620, 250, 62, 86);
-        add<Knob> (*this, owned, st, "noise_color", "COLOR", C::blue, true)->setBounds (684, 250, 62, 86);
     }
     void paint (juce::Graphics& g) override
     {
-        panel (g, { 0, 0, 300, 412 }, "OSC A", C::cyan, pv (st, "a_on") > 0.5f);
-        panel (g, { 308, 0, 300, 412 }, "OSC B", C::magenta, pv (st, "b_on") > 0.5f);
-        panel (g, { 616, 0, 132, 200 }, "SUB", C::violet, pv (st, "sub_on") > 0.5f);
-        panel (g, { 616, 208, 132, 204 }, "NOISE", C::blue, pv (st, "noise_on") > 0.5f);
-        // noise LED spectrum strip (purely decorative of the colour setting)
-        const float colr = pv (st, "noise_color");
-        for (int i = 0; i < 14; ++i)
-        {
-            const float t = (float) i / 13.0f;
-            const float lv = juce::jlimit (0.05f, 1.0f, 0.55f + (colr - 0.5f) * 1.6f * (t - 0.5f) * 2.0f);
-            drawLed (g, { 628.0f + i * 8.0f, 352.0f }, 2.2f, C::blue, pv (st, "noise_on") > 0.5f ? lv : 0.0f);
-        }
-        g.setFont (font (9.0f)); g.setColour (C::dim);
-        g.drawText ("SPECTRUM", 620, 362, 124, 12, juce::Justification::centred);
+        panel (g, { 0, 0, 244, 412 }, "OSC A", C::cyan, pv (st, "a_on") > 0.5f);
+        panel (g, { 252, 0, 244, 412 }, "OSC B", C::magenta, pv (st, "b_on") > 0.5f);
+        panel (g, { 504, 0, 244, 412 }, "OSC C", C::amber, pv (st, "c_on") > 0.5f);
     }
     void tick() override
     {
         for (auto* w : wt) if (w->changed()) w->repaint();
-        const float sig = pv (st, "a_on") + 2 * pv (st, "b_on") + 4 * pv (st, "sub_on") + 8 * pv (st, "noise_on") + 16 * pv (st, "noise_color");
+        const float sig = pv (st, "a_on") + 2 * pv (st, "b_on") + 4 * pv (st, "c_on");
         if (differs (sig, lastSig)) { lastSig = sig; repaint(); }
     }
 private:
     APVTS& st;
     std::vector<std::unique_ptr<juce::Component>> owned;
-    WavetableView* wt[2] {};
+    WavetableView* wt[3] {};
     float lastSig = -1;
 };
 
@@ -342,220 +474,531 @@ class FilterPage : public Page
 public:
     FilterPage (APVTS& s) : st (s)
     {
-        add<Toggle> (*this, owned, st, "flt_on", "", C::amber, true)->setBounds (6, 3, 20, 20);
-        add<Combo> (*this, owned, st, "flt_type", C::amber)->setBounds (226, 4, 126, 20);
-        fv = add<FilterView> (*this, owned, st); fv->setBounds (8, 30, 344, 112);
-        const char* ids[] = { "flt_cut", "flt_res", "flt_drive", "flt_env", "flt_key" };
-        const char* lbl[] = { "CUTOFF", "RESO", "DRIVE", "ENV AMT", "KEYTRK" };
-        for (int i = 0; i < 5; ++i) add<Knob> (*this, owned, st, ids[i], lbl[i], C::amber, i == 3)->setBounds (8 + i * 69, 148, 69, 96);
-
-        const char* vids[] = { "voices", "glide", "bend", "velsens" };
-        const char* vl[] = { "VOICES", "GLIDE", "BEND", "VELOCITY" };
-        for (int i = 0; i < 4; ++i) add<Knob> (*this, owned, st, vids[i], vl[i], C::blue)->setBounds (8 + i * 69, 288, 69, 96);
-        add<Toggle> (*this, owned, st, "legato", "LEGATO", C::blue)->setBounds (284, 320, 68, 24);
-
-        const juce::Colour ec[3] = { C::green, C::amber, C::magenta };
-        for (int e = 0; e < 3; ++e)
+        for (int f = 0; f < 2; ++f)
         {
-            const int y0 = e * 139;
-            ev[e] = add<EnvView> (*this, owned, st, e + 1, ec[e]); ev[e]->setBounds (376, y0 + 28, 148, 98);
-            const juce::String p = "e" + juce::String (e + 1) + "_";
-            const char* k[] = { "a", "d", "s", "r" };
-            const char* kl[] = { "ATTACK", "DECAY", "SUSTAIN", "RELEASE" };
-            for (int i = 0; i < 4; ++i) add<Knob> (*this, owned, st, p + k[i], kl[i], ec[e])->setBounds (530 + i * 54, y0 + 32, 54, 90);
+            const int x0 = f * 378;
+            const juce::String pre = f == 0 ? "flt" : "f2";
+            const auto col = f == 0 ? C::amber : C::orange;
+            add<Toggle> (*this, owned, st, pre + "_on", "", col, true)->setBounds (x0 + 6, 3, 20, 20);
+            add<Combo> (*this, owned, st, pre + "_type", col)->setBounds (x0 + 236, 4, 126, 20);
+            fv[f] = add<FilterView> (*this, owned, st, pre, col); fv[f]->setBounds (x0 + 8, 28, 354, 112);
+            const char* ids[] = { "_cut", "_res", "_drive", "_env", "_key" };
+            const char* lbl[] = { "CUTOFF", "RESO", "DRIVE", "ENV AMT", "KEYTRK" };
+            for (int i = 0; i < 5; ++i) add<Knob> (*this, owned, st, pre + ids[i], lbl[i], col, i == 3)->setBounds (x0 + 8 + i * 71, 146, 71, 98);
         }
+        add<Toggle> (*this, owned, st, "sub_on", "", C::violet, true)->setBounds (6, 261, 20, 20);
+        add<Combo> (*this, owned, st, "sub_shape", C::violet)->setBounds (10, 292, 112, 22);
+        add<Combo> (*this, owned, st, "sub_oct", C::violet)->setBounds (10, 322, 112, 22);
+        add<Knob> (*this, owned, st, "sub_level", "LEVEL", C::violet)->setBounds (128, 284, 108, 120);
+        add<Toggle> (*this, owned, st, "noise_on", "", C::blue, true)->setBounds (258, 261, 20, 20);
+        add<Knob> (*this, owned, st, "noise_level", "LEVEL", C::blue)->setBounds (262, 286, 112, 100);
+        add<Knob> (*this, owned, st, "noise_color", "COLOR", C::blue, true)->setBounds (378, 286, 112, 100);
+        add<Combo> (*this, owned, st, "flt_route", C::amber)->setBounds (512, 290, 228, 24);
     }
     void paint (juce::Graphics& g) override
     {
-        panel (g, { 0, 0, 360, 252 }, "FILTER", C::amber, pv (st, "flt_on") > 0.5f);
-        panel (g, { 0, 260, 360, 152 }, "VOICE", C::blue);
-        panel (g, { 368, 0, 380, 134 }, "ENV 1  -  AMP", C::green);
-        panel (g, { 368, 139, 380, 134 }, "ENV 2  -  FILTER", C::amber);
-        panel (g, { 368, 278, 380, 134 }, "ENV 3  -  MOD", C::magenta);
+        panel (g, { 0, 0, 370, 250 }, "FILTER 1", C::amber, pv (st, "flt_on") > 0.5f);
+        panel (g, { 378, 0, 370, 250 }, "FILTER 2", C::orange, pv (st, "f2_on") > 0.5f);
+        panel (g, { 0, 258, 244, 154 }, "SUB", C::violet, pv (st, "sub_on") > 0.5f);
+        panel (g, { 252, 258, 244, 154 }, "NOISE", C::blue, pv (st, "noise_on") > 0.5f);
+        panel (g, { 504, 258, 244, 154 }, "ROUTING", C::amber);
+        // routing diagram with LED blocks
+        const bool par = (int) pv (st, "flt_route") == 1;
+        const bool f1 = pv (st, "flt_on") > 0.5f, f2 = pv (st, "f2_on") > 0.5f;
+        auto block = [&] (float x, float y, const char* t, bool on, juce::Colour c)
+        {
+            juce::Rectangle<float> b (x, y, 46, 20);
+            g.setColour (c.withAlpha (on ? 0.18f : 0.05f)); g.fillRoundedRectangle (b, 4);
+            g.setColour (c.withAlpha (on ? 0.9f : 0.3f)); g.drawRoundedRectangle (b, 4, 1);
+            g.setFont (font (9.5f)); g.drawText (t, b, juce::Justification::centred);
+        };
+        g.setColour (C::dim);
+        if (! par)
+        {
+            block (514, 340, "OSC", true, C::cyan); block (578, 340, "F1", f1, C::amber); block (642, 340, "F2", f2, C::orange); block (700, 340, "OUT", true, C::green);
+            for (float x : { 560.0f, 624.0f, 688.0f }) { g.setColour (C::dim); g.drawArrow ({ x, 350, x + 16, 350 }, 1.2f, 6, 6); }
+        }
+        else
+        {
+            block (514, 340, "OSC", true, C::cyan); block (604, 322, "F1", f1, C::amber); block (604, 360, "F2", f2, C::orange); block (694, 340, "OUT", true, C::green);
+            g.setColour (C::dim);
+            g.drawArrow ({ 560, 346, 602, 332 }, 1.2f, 6, 6); g.drawArrow ({ 560, 354, 602, 370 }, 1.2f, 6, 6);
+            g.drawArrow ({ 650, 332, 692, 346 }, 1.2f, 6, 6); g.drawArrow ({ 650, 370, 692, 354 }, 1.2f, 6, 6);
+        }
+        g.setFont (font (9.0f)); g.setColour (C::dim);
+        g.drawFittedText ("Serial: F1 into F2.  Parallel: both filters side by side, then mixed.", 512, 384, 228, 24, juce::Justification::centredLeft, 2);
     }
     void tick() override
     {
-        if (fv->changed()) fv->repaint();
-        for (auto* e : ev) if (e->changed()) e->repaint();
-        const float sig = pv (st, "flt_on");
+        for (auto* f : fv) if (f->changed()) f->repaint();
+        const float sig = pv (st, "flt_on") + 2 * pv (st, "f2_on") + 4 * pv (st, "sub_on") + 8 * pv (st, "noise_on") + 16 * pv (st, "flt_route");
         if (differs (sig, lastSig)) { lastSig = sig; repaint(); }
     }
 private:
     APVTS& st;
     std::vector<std::unique_ptr<juce::Component>> owned;
-    FilterView* fv = nullptr; EnvView* ev[3] {};
+    FilterView* fv[2] {};
     float lastSig = -1;
 };
 
 //==============================================================================
-class ModPage : public Page
+class EnvPage : public Page
 {
 public:
-    ModPage (APVTS& s, LumenSynthProcessor& pr) : st (s)
+    EnvPage (LumenSynthProcessor& p, std::vector<ModBadge*>& badges) : st (p.apvts), proc (p)
     {
-        for (int l = 0; l < 2; ++l)
+        const juce::Colour ec[3] = { C::green, C::amber, C::magenta };
+        for (int e = 0; e < 3; ++e)
         {
-            const int x0 = l * 378;
-            const juce::String p = "l" + juce::String (l + 1) + "_";
-            const auto col = l == 0 ? C::blue : C::violet;
-            add<Combo> (*this, owned, st, p + "shape", col)->setBounds (x0 + 80, 4, 124, 20);
-            lv[l] = add<LfoView> (*this, owned, st, pr, l + 1, col); lv[l]->setBounds (x0 + 8, 30, 206, 138);
-            rate[l] = add<Knob> (*this, owned, st, p + "rate", "RATE", col); rate[l]->setBounds (x0 + 220, 30, 70, 96);
-            div[l] = add<Combo> (*this, owned, st, p + "div", col); div[l]->setBounds (x0 + 220, 140, 142, 22);
-            add<Toggle> (*this, owned, st, p + "sync", "SYNC", col)->setBounds (x0 + 294, 42, 68, 22);
-            add<Toggle> (*this, owned, st, p + "retrig", "RETRIG", col)->setBounds (x0 + 294, 72, 68, 22);
+            const int y0 = e * 139;
+            ev[e] = add<EnvView> (*this, owned, st, e + 1, ec[e]); ev[e]->setBounds (8, y0 + 28, 222, 98);
+            const juce::String pre = "e" + juce::String (e + 1) + "_";
+            const char* k[] = { "a", "d", "s", "r" };
+            const char* kl[] = { "ATTACK", "DECAY", "SUSTAIN", "RELEASE" };
+            for (int i = 0; i < 4; ++i) add<Knob> (*this, owned, st, pre + k[i], kl[i], ec[e])->setBounds (236 + i * 64, y0 + 30, 64, 96);
+            auto* b = add<ModBadge> (*this, owned, sE1 + e, "ENV " + juce::String (e + 1), ec[e]); b->setBounds (420, y0 + 4, 74, 18); badges.push_back (b);
         }
-        for (int m = 0; m < 8; ++m)
+        const char* vids[] = { "voices", "glide", "bend", "velsens" };
+        const char* vl[] = { "VOICES", "GLIDE", "BEND", "VELOCITY" };
+        for (int i = 0; i < 4; ++i) add<Knob> (*this, owned, st, vids[i], vl[i], C::blue)->setBounds (516 + (i % 2) * 112, 30 + (i / 2) * 110, 108, 104);
+        add<Toggle> (*this, owned, st, "legato", "LEGATO", C::blue)->setBounds (520, 252, 104, 24);
+        const int srcs[] = { sVel, sMW, sAT, sKey, sRnd, sBend };
+        const char* names[] = { "VELOCITY", "MOD WHEEL", "AFTERTOUCH", "KEY TRACK", "NOTE RND", "PITCH BEND" };
+        for (int i = 0; i < 6; ++i)
         {
-            const juce::String p = "m" + juce::String (m + 1) + "_";
-            const int y = 214 + m * 24;
-            add<Combo> (*this, owned, st, p + "src", C::cyan)->setBounds (34, y, 176, 20);
-            add<Combo> (*this, owned, st, p + "dst", C::magenta)->setBounds (240, y, 176, 20);
-            auto* sl = add<juce::Slider> (*this, owned);
-            sl->setSliderStyle (juce::Slider::LinearHorizontal); sl->setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
-            sl->setColour (juce::Slider::trackColourId, C::green);
-            sl->setDoubleClickReturnValue (true, 0.0);
-            sl->setBounds (426, y, 254, 20);
-            amtAtt[m] = std::make_unique<APVTS::SliderAttachment> (st, p + "amt", *sl);
-            auto* lb = add<juce::Label> (*this, owned);
-            lb->setFont (mono (11.0f)); lb->setColour (juce::Label::textColourId, C::green); lb->setJustificationType (juce::Justification::centredRight);
-            lb->setBounds (682, y, 58, 20);
-            sl->onValueChange = [sl, lb] { const double v = sl->getValue(); lb->setText ((v > 0 ? "+" : "") + juce::String (v * 100.0, 0) + "%", juce::dontSendNotification); };
-            sl->onValueChange();
+            auto* b = add<ModBadge> (*this, owned, srcs[i], names[i], C::text); b->setBounds (516 + (i % 2) * 112, 300 + (i / 2) * 24, 106, 18); badges.push_back (b);
         }
     }
     void paint (juce::Graphics& g) override
     {
-        panel (g, { 0, 0, 370, 176 }, "LFO 1", C::blue);
-        panel (g, { 378, 0, 370, 176 }, "LFO 2", C::violet);
-        drawLed (g, { 16.0f, 13.0f }, 3.4f, C::blue, 0.5f + 0.5f * lv[0]->value());
-        drawLed (g, { 394.0f, 13.0f }, 3.4f, C::violet, 0.5f + 0.5f * lv[1]->value());
-        panel (g, { 0, 184, 748, 228 }, "MOD MATRIX", C::green);
-        g.setFont (font (10.0f)); g.setColour (C::dim);
-        g.drawText ("SOURCE", 34, 190, 176, 16, juce::Justification::centredRight);
-        g.drawText ("DESTINATION", 240, 190, 176, 16, juce::Justification::centredLeft);
-        g.drawText ("AMOUNT", 426, 190, 254, 16, juce::Justification::centred);
-        for (int m = 0; m < 8; ++m)
+        panel (g, { 0, 0, 500, 134 }, "ENV 1  -  AMP", C::green);
+        panel (g, { 0, 139, 500, 134 }, "ENV 2  -  FILTER", C::amber);
+        panel (g, { 0, 278, 500, 134 }, "ENV 3  -  MOD", C::magenta);
+        panel (g, { 508, 0, 240, 412 }, "VOICE / PERFORMANCE", C::blue);
+        g.setFont (font (9.0f)); g.setColour (C::dim);
+        g.drawText ("DRAG A SOURCE ONTO ANY KNOB", 516, 280, 224, 14, juce::Justification::centredLeft);
+        // live wheel LEDs
+        const float mw = proc.modSourceValue (sMW), pb = proc.modSourceValue (sBend);
+        for (int k = 0; k < 12; ++k)
         {
-            const int y = 214 + m * 24;
-            const bool active = pv (st, "m" + juce::String (m + 1) + "_src") > 0.5f && pv (st, "m" + juce::String (m + 1) + "_dst") > 0.5f
-                                && std::abs (pv (st, "m" + juce::String (m + 1) + "_amt")) > 1.0e-4f;
-            drawLed (g, { 16.0f, y + 10.0f }, 3.4f, C::green, active ? 1.0f : 0.0f);
-            g.setColour (C::dim); g.setFont (font (12.0f));
-            g.drawText (juce::CharPointer_UTF8 ("\xe2\x96\xb6"), 212, y, 26, 20, juce::Justification::centred);
+            drawLed (g, { 524.0f + k * 9.0f, 386.0f }, 2.4f, C::cyan, mw * 12.0f > (float) k ? 1.0f : 0.0f);
+            const float c = (float) k - 5.5f;
+            drawLed (g, { 636.0f + k * 9.0f, 386.0f }, 2.4f, C::magenta, (pb > 0 ? c > 0 && c < pb * 6.0f + 0.5f : c < 0 && c > pb * 6.0f - 0.5f) ? 1.0f : 0.0f);
+        }
+        g.drawText ("MOD", 520, 394, 100, 12, juce::Justification::centredLeft);
+        g.drawText ("BEND", 632, 394, 100, 12, juce::Justification::centredLeft);
+    }
+    void tick() override
+    {
+        for (auto* e : ev) if (e->changed()) e->repaint();
+        repaint (516, 378, 230, 30);
+    }
+private:
+    APVTS& st; LumenSynthProcessor& proc;
+    std::vector<std::unique_ptr<juce::Component>> owned;
+    EnvView* ev[3] {};
+};
+
+//==============================================================================
+class LfoPage : public Page
+{
+public:
+    LfoPage (LumenSynthProcessor& p, std::vector<ModBadge*>& badges) : st (p.apvts)
+    {
+        const juce::Colour cols[4] = { C::blue, C::violet, C::cyan, C::magenta };
+        for (int l = 0; l < 4; ++l)
+        {
+            const int x0 = (l % 2) * 378, y0 = (l / 2) * 210;
+            const juce::String pre = "l" + juce::String (l + 1) + "_";
+            add<Combo> (*this, owned, st, pre + "shape", cols[l])->setBounds (x0 + 70, y0 + 4, 104, 20);
+            add<Combo> (*this, owned, st, pre + "mode", cols[l])->setBounds (x0 + 178, y0 + 4, 88, 20);
+            auto* b = add<ModBadge> (*this, owned, sL1 + l, "LFO " + juce::String (l + 1), cols[l]); b->setBounds (x0 + 272, y0 + 5, 90, 18); badges.push_back (b);
+            ed[l] = add<LfoEditor> (*this, owned, p, l, cols[l]); ed[l]->setBounds (x0 + 8, y0 + 28, 244, 166);
+            rate[l] = add<Knob> (*this, owned, st, pre + "rate", "RATE", cols[l]); rate[l]->setBounds (x0 + 258, y0 + 28, 104, 98);
+            div[l] = add<Combo> (*this, owned, st, pre + "div", cols[l]); div[l]->setBounds (x0 + 258, y0 + 134, 104, 22);
+            add<Toggle> (*this, owned, st, pre + "sync", "SYNC", cols[l])->setBounds (x0 + 258, y0 + 164, 104, 24);
+        }
+    }
+    void paint (juce::Graphics& g) override
+    {
+        const juce::Colour cols[4] = { C::blue, C::violet, C::cyan, C::magenta };
+        for (int l = 0; l < 4; ++l)
+        {
+            const float x0 = (float) ((l % 2) * 378), y0 = (float) ((l / 2) * 210);
+            panel (g, { x0, y0, 370, 202 }, "LFO " + juce::String (l + 1), cols[l]);
+            drawLed (g, { x0 + 16.0f, y0 + 13.0f }, 3.4f, cols[l], 0.5f + 0.5f * ed[l]->value());
         }
     }
     void tick() override
     {
-        const double dt = 1.0 / 30.0;
-        for (int l = 0; l < 2; ++l)
+        for (int l = 0; l < 4; ++l)
         {
-            lv[l]->advance (dt); lv[l]->repaint(); repaint (l * 378 + 4, 2, 26, 24);
+            ed[l]->repaint();
+            repaint ((l % 2) * 378 + 4, (l / 2) * 210 + 2, 26, 24);
             const bool sync = pv (st, "l" + juce::String (l + 1) + "_sync") > 0.5f;
             rate[l]->setAlpha (sync ? 0.35f : 1.0f); div[l]->setAlpha (sync ? 1.0f : 0.35f);
         }
-        float sig = 0; for (int m = 1; m <= 8; ++m) sig += (pv (st, "m" + juce::String (m) + "_src") * 3.0f + pv (st, "m" + juce::String (m) + "_dst")) * (float) m + (std::abs (pv (st, "m" + juce::String (m) + "_amt")) > 1e-4f ? 0.37f * m : 0.0f);
-        if (differs (sig, lastSig)) { lastSig = sig; repaint (0, 184, 40, 228); }
     }
 private:
     APVTS& st;
     std::vector<std::unique_ptr<juce::Component>> owned;
-    std::unique_ptr<APVTS::SliderAttachment> amtAtt[8];
-    LfoView* lv[2] {}; Knob* rate[2] {}; Combo* div[2] {};
-    float lastSig = -1;
+    LfoEditor* ed[4] {}; Knob* rate[4] {}; Combo* div[4] {};
 };
 
 //==============================================================================
-class FxPage : public Page
+class MatrixPage : public Page
 {
 public:
-    FxPage (APVTS& s, LumenSynthProcessor& pr) : st (s), proc (pr)
+    MatrixPage (LumenSynthProcessor& p) : st (p.apvts), proc (p)
     {
-        auto cell = [] (int i) { return juce::Point<int> ((i % 4) * 189, (i / 4) * 210); };
-        struct M { const char* on; juce::Colour col; };
-        const M mods[] = { { "dist_on", C::orange }, { "ott_on", C::amber }, { "cho_on", C::cyan }, { "dly_on", C::blue },
-                           { "rev_on", C::violet }, { "pump_on", C::magenta } };
-        for (int i = 0; i < 6; ++i) { auto p = cell (i); add<Toggle> (*this, owned, st, mods[i].on, "", mods[i].col, true)->setBounds (p.x + 6, p.y + 3, 20, 20); }
-        auto knob = [&] (int c, const char* id, const char* l, juce::Colour col, int x, int y, int w = 58, int h = 88)
-        { auto p = cell (c); add<Knob> (*this, owned, st, id, l, col)->setBounds (p.x + x, p.y + y, w, h); };
-        auto combo = [&] (int c, const char* id, juce::Colour col, int x, int y, int w)
-        { auto p = cell (c); add<Combo> (*this, owned, st, id, col)->setBounds (p.x + x, p.y + y, w, 22); };
-
-        combo (0, "dist_mode", C::orange, 8, 32, 165);
-        knob (0, "dist_drive", "DRIVE", C::orange, 14, 70, 76, 104); knob (0, "dist_mix", "MIX", C::orange, 92, 70, 76, 104);
-        knob (1, "ott_depth", "DEPTH", C::amber, 8, 34, 84, 110); knob (1, "ott_time", "TIME", C::amber, 92, 34, 84, 110);
-        knob (2, "cho_rate", "RATE", C::cyan, 4, 40); knob (2, "cho_depth", "DEPTH", C::cyan, 62, 40); knob (2, "cho_mix", "MIX", C::cyan, 120, 40);
-        combo (3, "dly_div", C::blue, 8, 32, 104);
-        { auto p = cell (3); add<Toggle> (*this, owned, st, "dly_ping", "PING", C::blue)->setBounds (p.x + 116, p.y + 32, 58, 22); }
-        knob (3, "dly_fb", "FEEDBACK", C::blue, 4, 66); knob (3, "dly_tone", "TONE", C::blue, 62, 66); knob (3, "dly_mix", "MIX", C::blue, 120, 66);
-        knob (4, "rev_size", "SIZE", C::violet, 14, 28, 76, 84); knob (4, "rev_decay", "DECAY", C::violet, 92, 28, 76, 84);
-        knob (4, "rev_damp", "DAMP", C::violet, 14, 112, 76, 84); knob (4, "rev_mix", "MIX", C::violet, 92, 112, 76, 84);
-        combo (5, "pump_div", C::magenta, 8, 32, 140);
-        knob (5, "pump_depth", "DEPTH", C::magenta, 4, 66, 70, 100); knob (5, "pump_curve", "RELEASE", C::magenta, 74, 66, 70, 100);
-        knob (6, "vol", "VOLUME", C::green, 34, 30, 112, 128);
-        { auto p = cell (6); add<Toggle> (*this, owned, st, "clip", "SOFT CLIP", C::green)->setBounds (p.x + 40, p.y + 164, 100, 24); }
+        for (int m = 0; m < kSlots; ++m)
+        {
+            const juce::String pre = "m" + juce::String (m + 1) + "_";
+            const int y = 40 + m * 23;
+            add<Combo> (*this, owned, st, pre + "src", C::cyan)->setBounds (30, y, 150, 19);
+            add<Combo> (*this, owned, st, pre + "dst", C::magenta)->setBounds (250, y, 186, 19);
+            auto* sl = add<juce::Slider> (*this, owned);
+            sl->setSliderStyle (juce::Slider::LinearHorizontal); sl->setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
+            sl->setColour (juce::Slider::trackColourId, C::green);
+            sl->setDoubleClickReturnValue (true, 0.0);
+            sl->setBounds (444, y, 224, 19);
+            att[m] = std::make_unique<APVTS::SliderAttachment> (st, pre + "amt", *sl);
+            auto* lb = add<juce::Label> (*this, owned);
+            lb->setFont (mono (11.0f)); lb->setColour (juce::Label::textColourId, C::green); lb->setJustificationType (juce::Justification::centredRight);
+            lb->setBounds (668, y, 50, 19);
+            sl->onValueChange = [sl, lb] { const double v = sl->getValue(); lb->setText ((v > 0 ? "+" : "") + juce::String (v * 100.0, 0) + "%", juce::dontSendNotification); };
+            sl->onValueChange();
+            auto* x = add<juce::TextButton> (*this, owned, "x");
+            x->setColour (juce::TextButton::buttonColourId, C::red);
+            x->setBounds (722, y, 20, 19);
+            x->onClick = [this, m] { proc.clearModSlot (m); };
+        }
     }
     void paint (juce::Graphics& g) override
     {
-        const char* names[] = { "DISTORTION", "OTT", "CHORUS", "DELAY", "REVERB", "PUMP", "MASTER", "OUTPUT" };
-        const char* ons[] = { "dist_on", "ott_on", "cho_on", "dly_on", "rev_on", "pump_on", nullptr, nullptr };
-        const juce::Colour cols[] = { C::orange, C::amber, C::cyan, C::blue, C::violet, C::magenta, C::green, C::green };
-        for (int i = 0; i < 8; ++i)
-            panel (g, juce::Rectangle<float> ((float) ((i % 4) * 189), (float) ((i / 4) * 210), 181.0f, 202.0f), names[i], cols[i],
-                   ons[i] == nullptr || pv (st, ons[i]) > 0.5f);
-        // OTT band LEDs (decorative depth indicator)
-        const float depth = pv (st, "ott_on") > 0.5f ? pv (st, "ott_depth") : 0.0f;
-        const char* bands[] = { "LOW", "MID", "HIGH" };
-        for (int b = 0; b < 3; ++b)
+        panel (g, { 0, 0, 748, 412 }, "MOD MATRIX  -  16 SLOTS", C::green);
+        g.setFont (font (10.0f)); g.setColour (C::dim);
+        g.drawText ("SOURCE", 30, 22, 150, 14, juce::Justification::centredLeft);
+        g.drawText ("LIVE", 184, 22, 60, 14, juce::Justification::centred);
+        g.drawText ("DESTINATION", 250, 22, 186, 14, juce::Justification::centredLeft);
+        g.drawText ("AMOUNT", 444, 22, 224, 14, juce::Justification::centred);
+        for (int m = 0; m < kSlots; ++m)
         {
+            const juce::String pre = "m" + juce::String (m + 1) + "_";
+            const int y = 40 + m * 23;
+            const int src = (int) pv (st, pre + "src");
+            const bool active = src > 0 && pv (st, pre + "dst") > 0.5f && std::abs (pv (st, pre + "amt")) > 1.0e-4f;
+            drawLed (g, { 15.0f, y + 9.5f }, 3.2f, C::green, active ? 1.0f : 0.0f);
+            // live source meter
+            const float v = src > 0 ? proc.modSourceValue (src) : 0.0f;
+            const bool bip = isBipolarSrc (src);
             for (int k = 0; k < 8; ++k)
-                drawLed (g, { 200.0f + 40.0f + b * 50.0f + (k % 2) * 8.0f, 160.0f + (float) (k / 2) * 8.0f }, 2.0f, C::amber, depth * 8.0f > (float) k ? 0.9f : 0.0f);
-            g.setFont (font (8.5f)); g.setColour (C::dim);
-            g.drawText (bands[b], 228 + b * 50, 192, 40, 10, juce::Justification::centred);
+            {
+                const float t = (k + 0.5f) / 8.0f;
+                const float lit = bip ? ((v >= 0 && t >= 0.5f && t - 0.5f <= v * 0.5f) || (v < 0 && t < 0.5f && 0.5f - t <= -v * 0.5f) ? 1.0f : 0.0f)
+                                      : (t <= v ? 1.0f : 0.0f);
+                drawLed (g, { 188.0f + k * 7.0f, y + 9.5f }, 2.0f, sourceColour (src), src > 0 ? lit : 0.0f);
+            }
         }
-        // pump gain LEDs
+    }
+    void tick() override { repaint (6, 40, 240, kSlots * 23); }
+private:
+    APVTS& st; LumenSynthProcessor& proc;
+    std::vector<std::unique_ptr<juce::Component>> owned;
+    std::unique_ptr<APVTS::SliderAttachment> att[kSlots];
+};
+
+//==============================================================================
+// FX rack: reorderable list on the left, editor for the selected effect on the right
+class FxPage : public Page
+{
+public:
+    FxPage (LumenSynthProcessor& p) : st (p.apvts), proc (p)
+    {
+        static const char* onIds[] = { "hyp_on", "dist_on", "fla_on", "pha_on", "cho_on", "dly_on", "cmp_on", "rev_on", "eq_on", "ott_on", "pump_on" };
+        for (int i = 0; i < kNumFx; ++i)
         {
-            const float pg = proc.pumpGain.load();
-            const bool on = pv (st, "pump_on") > 0.5f;
-            for (int k = 0; k < 12; ++k)
-                drawLed (g, { 189.0f + 162.0f, 210.0f + 180.0f - k * 10.0f }, 2.6f, C::magenta, on && pg * 12.0f > (float) k ? 1.0f : 0.0f);
+            rows[i].power = add<Toggle> (*this, owned, st, onIds[i], "", fxCol (i), true);
+            rows[i].sel = add<juce::TextButton> (*this, owned, fxNames()[i]);
+            rows[i].sel->setColour (juce::TextButton::buttonColourId, fxCol (i));
+            rows[i].sel->onClick = [this, i] { select (i); };
+            rows[i].up = add<juce::TextButton> (*this, owned, juce::CharPointer_UTF8 ("\xe2\x96\xb2"));
+            rows[i].dn = add<juce::TextButton> (*this, owned, juce::CharPointer_UTF8 ("\xe2\x96\xbc"));
+            for (auto* b : { rows[i].up, rows[i].dn }) b->setColour (juce::TextButton::buttonColourId, C::dim);
+            rows[i].up->onClick = [this, i] { move (i, -1); };
+            rows[i].dn->onClick = [this, i] { move (i, 1); };
+            editors[i] = add<juce::Component> (*this, owned);
+            editors[i]->setBounds (208, 0, 540, 262);
+            editors[i]->setInterceptsMouseClicks (false, true);
+            buildEditor (i);
+        }
+        add<Knob> (*this, owned, st, "vol", "VOLUME", C::green)->setBounds (226, 292, 100, 112);
+        add<Toggle> (*this, owned, st, "clip", "SOFT CLIP", C::green)->setBounds (346, 330, 110, 24);
+        layoutRack();
+        select (0);
+    }
+    static juce::Colour fxCol (int i)
+    {
+        const juce::Colour c[] = { C::cyan, C::orange, C::blue, C::violet, C::cyan, C::blue, C::green, C::violet, C::amber, C::amber, C::magenta };
+        return c[i];
+    }
+    void layoutRack()
+    {
+        const auto order = proc.getFxOrder();
+        for (int slot = 0; slot < kNumFx; ++slot)
+        {
+            const int id = order[(size_t) slot];
+            const int y = 28 + slot * 34;
+            rows[id].power->setBounds (8, y + 5, 20, 20);
+            rows[id].sel->setBounds (32, y + 3, 118, 26);
+            rows[id].up->setBounds (154, y + 3, 20, 12);
+            rows[id].dn->setBounds (154, y + 17, 20, 12);
+            rows[id].slot = slot;
+        }
+        lastOrder = proc.orderVersion.load();
+        repaint();
+    }
+    void select (int i)
+    {
+        selected = i;
+        for (int k = 0; k < kNumFx; ++k) editors[k]->setVisible (k == i);
+        repaint();
+    }
+    void move (int id, int delta) { proc.moveFx (rows[id].slot, delta); layoutRack(); }
+
+    void buildEditor (int i)
+    {
+        auto& e = *editors[i];
+        const auto col = fxCol (i);
+        auto knob = [&] (const char* id, const char* l, int k, int row = 0, bool bip = false)
+        { add<Knob> (e, owned, st, id, l, col, bip)->setBounds (16 + k * 104, 40 + row * 110, 100, 108); };
+        switch (i)
+        {
+            case fxHyper:   knob ("hyp_detune", "DETUNE", 0); knob ("hyp_dim", "DIMENSION", 1); knob ("hyp_mix", "MIX", 2); break;
+            case fxDist:    add<Combo> (e, owned, st, "dist_mode", col)->setBounds (16, 40, 150, 24); knob ("dist_drive", "DRIVE", 2); knob ("dist_mix", "MIX", 3); break;
+            case fxFlanger: knob ("fla_rate", "RATE", 0); knob ("fla_depth", "DEPTH", 1); knob ("fla_fb", "FEEDBACK", 2, 0, true); knob ("fla_mix", "MIX", 3); break;
+            case fxPhaser:  knob ("pha_rate", "RATE", 0); knob ("pha_depth", "DEPTH", 1); knob ("pha_fb", "FEEDBACK", 2); knob ("pha_mix", "MIX", 3); break;
+            case fxChorus:  knob ("cho_rate", "RATE", 0); knob ("cho_depth", "DEPTH", 1); knob ("cho_mix", "MIX", 2); break;
+            case fxDelay:   add<Combo> (e, owned, st, "dly_div", col)->setBounds (16, 40, 120, 24);
+                            add<Toggle> (e, owned, st, "dly_ping", "PING PONG", col)->setBounds (16, 72, 120, 24);
+                            knob ("dly_fb", "FEEDBACK", 2); knob ("dly_tone", "TONE", 3); knob ("dly_mix", "MIX", 4); break;
+            case fxComp:    knob ("cmp_thresh", "THRESHOLD", 0); knob ("cmp_ratio", "RATIO", 1); knob ("cmp_attack", "ATTACK", 2); knob ("cmp_release", "RELEASE", 3); knob ("cmp_gain", "GAIN", 4); break;
+            case fxReverb:  knob ("rev_size", "SIZE", 0); knob ("rev_decay", "DECAY", 1); knob ("rev_damp", "DAMP", 2); knob ("rev_mix", "MIX", 3); break;
+            case fxEq:      knob ("eq_low", "LOW", 0, 0, true); knob ("eq_mid", "MID", 1, 0, true); knob ("eq_mfreq", "MID FREQ", 2); knob ("eq_high", "HIGH", 3, 0, true); break;
+            case fxOtt:     knob ("ott_depth", "DEPTH", 0); knob ("ott_time", "TIME", 1); break;
+            case fxPump:    add<Combo> (e, owned, st, "pump_div", col)->setBounds (16, 40, 120, 24); knob ("pump_depth", "DEPTH", 2); knob ("pump_curve", "RELEASE", 3); break;
+            default: break;
+        }
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        panel (g, { 0, 0, 200, 412 }, "FX RACK", C::magenta);
+        // highlight the selected row
+        const int y = 28 + rows[selected].slot * 34;
+        g.setColour (fxCol (selected).withAlpha (0.12f)); g.fillRoundedRectangle (4.0f, (float) y, 192.0f, 32.0f, 5.0f);
+        g.setColour (fxCol (selected).withAlpha (0.6f)); g.drawRoundedRectangle (4.0f, (float) y, 192.0f, 32.0f, 5.0f, 1.0f);
+        // signal-flow LEDs between rows
+        for (int s = 0; s < kNumFx - 1; ++s) drawLed (g, { 184.0f, 28.0f + s * 34 + 33.0f }, 1.6f, C::green, 0.5f);
+
+        const auto col = fxCol (selected);
+        panel (g, { 208, 0, 540, 262 }, fxNames()[selected], col);
+        panel (g, { 208, 270, 266, 142 }, "MASTER", C::green);
+        panel (g, { 482, 270, 266, 142 }, "OUTPUT", C::green);
+
+        // per-effect visualisers
+        auto vis = juce::Rectangle<float> (224.0f, 162.0f, 508.0f, 88.0f);
+        switch (selected)
+        {
+            case fxComp:
+            {
+                lcd (g, vis, col);
+                const float gr = proc.compGr.load();
+                g.setFont (font (9.5f)); g.setColour (col.withAlpha (0.7f));
+                g.drawText ("GAIN REDUCTION", vis.reduced (8, 6), juce::Justification::topLeft);
+                ledMeterReduction (g, vis.reduced (12.0f, 30.0f), -gr, 24.0f, col);
+                break;
+            }
+            case fxOtt:
+            {
+                lcd (g, vis, col);
+                const char* bn[] = { "LOW", "MID", "HIGH" };
+                for (int b = 0; b < 3; ++b)
+                {
+                    const float db = juce::Decibels::gainToDecibels (proc.ottBand[b].load());
+                    auto rr = juce::Rectangle<float> (vis.getX() + 60.0f + b * 150.0f, vis.getY() + 14.0f, 110.0f, 56.0f);
+                    for (int k = 0; k < 12; ++k)
+                    {
+                        const float t = (float) k - 5.5f;
+                        const bool lit = db >= 0 ? (t > 0 && t < db / 2.0f + 0.5f) : (t < 0 && t > db / 2.0f - 0.5f);
+                        drawLed (g, { rr.getX() + k * 9.0f, rr.getCentreY() }, 2.6f, db >= 0 ? C::green : C::amber, lit ? 1.0f : 0.0f);
+                    }
+                    g.setFont (font (9.0f)); g.setColour (C::dim);
+                    g.drawText (bn[b], rr.withY (rr.getCentreY() + 8.0f).withHeight (14.0f), juce::Justification::centred);
+                }
+                break;
+            }
+            case fxPump:
+            {
+                lcd (g, vis, col);
+                const float pg = proc.pumpGain.load();
+                for (int k = 0; k < 40; ++k) drawLed (g, { vis.getX() + 16.0f + k * 12.0f, vis.getCentreY() }, 3.0f, col, pv (st, "pump_on") > 0.5f && pg * 40.0f > (float) k ? 1.0f : 0.0f);
+                break;
+            }
+            case fxEq:
+            {
+                lcd (g, vis, col);
+                juce::Path pth;
+                lumen::synth::Biquad b[3];
+                b[0].set (0, 110.0, pv (st, "eq_low"), 0.7, 48000.0); b[1].set (1, pv (st, "eq_mfreq"), pv (st, "eq_mid"), 0.8, 48000.0); b[2].set (2, 7500.0, pv (st, "eq_high"), 0.7, 48000.0);
+                for (int i = 0; i <= 120; ++i)
+                {
+                    const double f = 20.0 * std::pow (1000.0, i / 120.0), w = 2.0 * 3.141592653589793 * f / 48000.0;
+                    double db = 0;
+                    for (auto& q : b)
+                    {
+                        const std::complex<double> z = std::exp (std::complex<double> (0, -w));
+                        const auto num = q.b0 + q.b1 * z + q.b2 * z * z, den = 1.0 + q.a1 * z + q.a2 * z * z;
+                        db += 20.0 * std::log10 (std::abs (num / den));
+                    }
+                    const float px = vis.getX() + 8 + (vis.getWidth() - 16) * i / 120.0f, py = vis.getCentreY() - (float) db * 2.4f;
+                    if (i == 0) pth.startNewSubPath (px, py); else pth.lineTo (px, py);
+                }
+                glowPath (g, pth, col, 1.5f);
+                break;
+            }
+            default:
+            {
+                lcd (g, vis, col);
+                matrix.draw (g, vis.reduced (12.0f, 20.0f), fxNames()[selected] + (pv (st, rowsOnId (selected)) > 0.5f ? "  ON" : "  OFF"), col, 3.4f, juce::Justification::centred, true, 10.6f);
+                break;
+            }
         }
         // output meters
-        auto o = juce::Rectangle<float> (567.0f + 189.0f - 189.0f + 0.0f, 210.0f, 181.0f, 202.0f);
-        o = juce::Rectangle<float> (3 * 189.0f, 210.0f, 181.0f, 202.0f);
-        ledMeter (g, { o.getX() + 46.0f, o.getY() + 34.0f, 30.0f, 128.0f }, mL, hL, true, 24);
-        ledMeter (g, { o.getX() + 104.0f, o.getY() + 34.0f, 30.0f, 128.0f }, mR, hR, true, 24);
-        g.setFont (font (10.0f)); g.setColour (C::dim);
-        g.drawText ("L", (int) o.getX() + 46, (int) o.getY() + 164, 30, 12, juce::Justification::centred);
-        g.drawText ("R", (int) o.getX() + 104, (int) o.getY() + 164, 30, 12, juce::Justification::centred);
+        auto o = juce::Rectangle<float> (494.0f, 302.0f, 242.0f, 100.0f);
+        ledMeter (g, { o.getX(), o.getY() + 6.0f, o.getWidth(), 12.0f }, mL, hL, false, 30);
+        ledMeter (g, { o.getX(), o.getY() + 24.0f, o.getWidth(), 12.0f }, mR, hR, false, 30);
         const float pk = juce::Decibels::gainToDecibels (juce::jmax (hL, hR), -60.0f);
-        peakMatrix.draw (g, { o.getX() + 8.0f, o.getY() + 176.0f, 165.0f, 22.0f }, pk <= -59.0f ? juce::String ("-INF DB") : juce::String (pk, 1) + " DB",
-                         pk > -0.5f ? C::red : C::green, 2.2f, juce::Justification::centred, false, 10.0f);
+        peakMatrix.draw (g, { o.getX(), o.getY() + 50.0f, o.getWidth(), 34.0f }, pk <= -59.0f ? juce::String ("-INF DB") : juce::String (pk, 1) + " DB",
+                         pk > -0.5f ? C::red : C::green, 3.0f, juce::Justification::centred, false, 10.6f);
+    }
+    static const char* rowsOnId (int i)
+    {
+        static const char* onIds[] = { "hyp_on", "dist_on", "fla_on", "pha_on", "cho_on", "dly_on", "cmp_on", "rev_on", "eq_on", "ott_on", "pump_on" };
+        return onIds[i];
+    }
+    static void ledMeterReduction (juce::Graphics& g, juce::Rectangle<float> r, float grDb, float range, juce::Colour col)
+    {
+        const int segs = 40;
+        for (int k = 0; k < segs; ++k)
+        {
+            const float t = (k + 0.5f) / segs;
+            drawLed (g, { r.getX() + r.getWidth() * t, r.getCentreY() }, 3.0f, col, t * range <= grDb ? 1.0f : 0.0f);
+        }
     }
     void tick() override
     {
         const float l = proc.peakL.load(), r = proc.peakR.load();
         mL = juce::jmax (l, mL * 0.82f); mR = juce::jmax (r, mR * 0.82f);
-        if (l > hL || r > hR || ++holdT > 45) { hL = juce::jmax (l, holdT > 45 ? 0.0f : hL); hR = juce::jmax (r, holdT > 45 ? 0.0f : hR); if (holdT > 45) { holdT = 0; hL = l; hR = r; } }
-        repaint (189, 210, 181, 202);
-        repaint (3 * 189, 210, 181, 202);
-        const float sig = pv (st, "dist_on") + 2 * pv (st, "ott_on") + 4 * pv (st, "cho_on") + 8 * pv (st, "dly_on") + 16 * pv (st, "rev_on") + 32 * pv (st, "pump_on") + 64 * pv (st, "ott_depth");
-        if (differs (sig, lastSig)) { lastSig = sig; repaint(); }
+        if (++holdT > 45) { holdT = 0; hL = l; hR = r; }
+        hL = juce::jmax (hL, l); hR = juce::jmax (hR, r);
+        if (proc.orderVersion.load() != lastOrder) layoutRack();
+        repaint (482, 270, 266, 142);
+        repaint (208, 150, 540, 112);
+    }
+private:
+    struct Row { Toggle* power = nullptr; juce::TextButton* sel = nullptr; juce::TextButton* up = nullptr; juce::TextButton* dn = nullptr; int slot = 0; };
+    APVTS& st; LumenSynthProcessor& proc;
+    std::vector<std::unique_ptr<juce::Component>> owned;
+    Row rows[kNumFx];
+    juce::Component* editors[kNumFx] {};
+    int selected = 0, lastOrder = -1;
+    float mL = 0, mR = 0, hL = 0, hR = 0; int holdT = 0;
+    DotMatrix peakMatrix, matrix;
+};
+
+//==============================================================================
+class ArpPage : public Page
+{
+public:
+    ArpPage (LumenSynthProcessor& p) : st (p.apvts), proc (p)
+    {
+        add<Toggle> (*this, owned, st, "arp_on", "", C::cyan, true)->setBounds (6, 3, 20, 20);
+        add<Combo> (*this, owned, st, "arp_mode", C::cyan)->setBounds (16, 36, 160, 24);
+        add<Combo> (*this, owned, st, "arp_rate", C::cyan)->setBounds (16, 70, 160, 24);
+        add<Knob> (*this, owned, st, "arp_oct", "OCTAVES", C::cyan)->setBounds (196, 30, 104, 104);
+        add<Knob> (*this, owned, st, "arp_gate", "GATE", C::cyan)->setBounds (304, 30, 104, 104);
+        add<Knob> (*this, owned, st, "arp_swing", "SWING", C::cyan)->setBounds (412, 30, 104, 104);
+        add<Combo> (*this, owned, st, "chord", C::magenta)->setBounds (16, 292, 160, 24);
+    }
+    void paint (juce::Graphics& g) override
+    {
+        const bool on = pv (st, "arp_on") > 0.5f;
+        panel (g, { 0, 0, 748, 250 }, "ARPEGGIATOR", C::cyan, on);
+        panel (g, { 0, 258, 370, 154 }, "CHORD MEMORY", C::magenta, (int) pv (st, "chord") > 0);
+        panel (g, { 378, 258, 370, 154 }, "HOW TO", C::green);
+        // 16 step LEDs
+        auto steps = juce::Rectangle<float> (16.0f, 150.0f, 716.0f, 80.0f);
+        lcd (g, steps, C::cyan);
+        for (int k = 0; k < 16; ++k)
+        {
+            const float x = steps.getX() + 30.0f + k * (steps.getWidth() - 60.0f) / 15.0f;
+            drawLed (g, { x, steps.getCentreY() - 8.0f }, 6.0f, k % 4 == 0 ? C::magenta : C::cyan, on && k == step ? 1.0f : 0.0f);
+            g.setFont (font (9.0f)); g.setColour (C::dim);
+            g.drawText (juce::String (k + 1), (int) x - 10, (int) steps.getCentreY() + 8, 20, 12, juce::Justification::centred);
+        }
+        // chord display: mini piano (C-1 octave .. +2 octaves), lit keys glow
+        const auto& iv = Arp::chordIntervals ((int) pv (st, "chord"));
+        auto kb = juce::Rectangle<float> (190.0f, 290.0f, 168.0f, 96.0f);
+        lcd (g, kb, C::magenta);
+        auto keys = kb.reduced (8.0f, 10.0f).withTrimmedBottom (14.0f);
+        const int whites = 22;                       // 3 octaves + C
+        const float ww = keys.getWidth() / whites;
+        auto isLit = [&] (int s) { return std::find (iv.begin(), iv.end(), s) != iv.end(); };
+        static const int whitePc[7] = { 0, 2, 4, 5, 7, 9, 11 };
+        for (int w = 0; w < whites; ++w)
+        {
+            const int semi = (w / 7) * 12 + whitePc[w % 7] - 12;
+            auto r = juce::Rectangle<float> (keys.getX() + w * ww + 0.5f, keys.getY(), ww - 1.0f, keys.getHeight());
+            const bool lit = isLit (semi);
+            g.setColour (lit ? (semi == 0 ? C::cyan : C::magenta) : juce::Colour (0xff2a3340)); g.fillRoundedRectangle (r, 1.5f);
+            if (lit) { g.setColour ((semi == 0 ? C::cyan : C::magenta).withAlpha (0.3f)); g.fillRoundedRectangle (r.expanded (1.5f), 2.0f); }
+        }
+        for (int w = 0; w < whites - 1; ++w)
+        {
+            const int pc = whitePc[w % 7];
+            if (pc == 4 || pc == 11) continue;
+            const int semi = (w / 7) * 12 + pc + 1 - 12;
+            auto r = juce::Rectangle<float> (keys.getX() + (w + 1) * ww - ww * 0.32f, keys.getY(), ww * 0.64f, keys.getHeight() * 0.6f);
+            const bool lit = isLit (semi);
+            g.setColour (lit ? C::magenta : juce::Colour (0xff05070a)); g.fillRoundedRectangle (r, 1.0f);
+        }
+        g.setFont (font (8.5f)); g.setColour (C::dim);
+        g.drawText ("ROOT", (int) (keys.getX() + 7 * ww - 6), (int) keys.getBottom() + 1, 40, 12, juce::Justification::centredLeft);
+        g.setFont (font (10.5f, false)); g.setColour (C::text.withAlpha (0.8f));
+        g.drawFittedText ("CHORD: one key plays a full chord.\nARP: hold keys, the arp plays them in time with your DAW (sync to tempo).\n"
+                          "Both work together - pick a chord, turn the arp on and hold one key.",
+                          juce::Rectangle<int> (392, 288, 344, 110), juce::Justification::topLeft, 6);
+    }
+    void tick() override
+    {
+        const int f = proc.arpStepFlash.load();
+        if (f != lastFlash) { lastFlash = f; step = (step + 1) % 16; repaint (16, 150, 716, 80); }
     }
 private:
     APVTS& st; LumenSynthProcessor& proc;
     std::vector<std::unique_ptr<juce::Component>> owned;
-    float mL = 0, mR = 0, hL = 0, hR = 0, lastSig = -1; int holdT = 0;
-    DotMatrix peakMatrix;
+    int lastFlash = 0, step = -1;
 };
 
 //==============================================================================
+// Right column
 class SmartPanel : public Page
 {
 public:
     SmartPanel (LumenSynthProcessor& p) : proc (p)
     {
-        category.addItemList (lumen::synth::categories(), 1);
+        category.addItemList (categories(), 1);
         category.setSelectedId (1, juce::dontSendNotification);
         category.setColour (juce::ComboBox::textColourId, C::cyan);
         addAndMakeVisible (category);
@@ -588,9 +1031,9 @@ public:
         drawLed (g, { 16.0f, 13.0f }, 3.0f, C::cyan, 0.6f + 0.4f * breathe);
         g.setFont (font (9.0f)); g.setColour (C::dim);
         g.drawText ("AMOUNT", 134, 108, 56, 10, juce::Justification::centred);
-        auto st = juce::Rectangle<float> (10.0f, 126.0f, 248.0f, 30.0f);
-        lcd (g, st, C::cyan);
-        matrix.draw (g, st.reduced (6.0f, 2.0f), status, C::cyan.interpolatedWith (juce::Colours::white, 0.3f * flash), 2.2f, juce::Justification::centred, true, 10.0f);
+        auto stR = juce::Rectangle<float> (10.0f, 126.0f, 248.0f, 30.0f);
+        lcd (g, stR, C::cyan);
+        matrix.draw (g, stR.reduced (6.0f, 2.0f), status, C::cyan.interpolatedWith (juce::Colours::white, 0.3f * flash), 2.2f, juce::Justification::centred, true, 10.0f);
         g.setFont (font (9.5f, false)); g.setColour (C::dim.brighter (0.2f));
         g.drawFittedText ("GENERATE designs a full patch for the style.  MUTATE makes a variation.  UNDO steps back.",
                           juce::Rectangle<int> (10, 160, 248, 30), juce::Justification::centredLeft, 2);
@@ -616,18 +1059,20 @@ private:
 class MacroPanel : public Page
 {
 public:
-    MacroPanel (APVTS& s)
+    MacroPanel (APVTS& s, std::vector<ModBadge*>& badges)
     {
         const juce::Colour cols[] = { C::cyan, C::magenta, C::amber, C::green };
         for (int m = 0; m < 4; ++m)
-            add<Knob> (*this, owned, s, "macro" + juce::String (m + 1), "MACRO " + juce::String (m + 1), cols[m])->setBounds (6 + m * 64, 26, 64, 82);
+        {
+            add<Knob> (*this, owned, s, "macro" + juce::String (m + 1), "MACRO " + juce::String (m + 1), cols[m])->setBounds (6 + m * 64, 22, 64, 78);
+            auto* b = add<ModBadge> (*this, owned, sM1 + m, "M" + juce::String (m + 1), cols[m]); b->setBounds (14 + m * 64, 100, 48, 14); badges.push_back (b);
+        }
     }
     void paint (juce::Graphics& g) override { panel (g, getLocalBounds().toFloat(), "MACROS", C::cyan); }
 private:
     std::vector<std::unique_ptr<juce::Component>> owned;
 };
 
-// LED-matrix oscilloscope
 class ScopePanel : public Page
 {
 public:
@@ -638,9 +1083,8 @@ public:
         auto a = getLocalBounds().toFloat().reduced (10.0f, 6.0f).withTrimmedTop (20.0f);
         lcd (g, a, C::green);
         a = a.reduced (4.0f, 3.0f);
-        const int cols = 62, rows = 13;
+        const int cols = 62, rows = 11;
         const float px = a.getWidth() / cols, py = a.getHeight() / rows;
-        // trigger: find a rising zero crossing in the recent history
         const int N = LumenSynthProcessor::kScope;
         const int wp = proc.scopePos.load (std::memory_order_acquire);
         float buf[LumenSynthProcessor::kScope];
@@ -657,9 +1101,8 @@ public:
             const int row = juce::jlimit (0, rows - 1, (int) std::round ((1.0f - (v + 1.0f) * 0.5f) * (rows - 1)));
             for (int r = 0; r < rows; ++r)
             {
-                const bool between = prevRow >= 0 && ((r > juce::jmin (row, prevRow) && r < juce::jmax (row, prevRow)));
-                const float lv = r == row ? 1.0f : between ? 0.55f : 0.0f;
-                drawLed (g, { a.getX() + (c + 0.5f) * px, a.getY() + (r + 0.5f) * py }, juce::jmin (px, py) * 0.32f, C::green, lv);
+                const bool between = prevRow >= 0 && r > juce::jmin (row, prevRow) && r < juce::jmax (row, prevRow);
+                drawLed (g, { a.getX() + (c + 0.5f) * px, a.getY() + (r + 0.5f) * py }, juce::jmin (px, py) * 0.32f, C::green, r == row ? 1.0f : between ? 0.55f : 0.0f);
             }
             prevRow = row;
         }
@@ -668,6 +1111,132 @@ public:
 private:
     LumenSynthProcessor& proc;
     float gainSm = 1.0f;
+};
+
+//==============================================================================
+// Preset browser overlay: search, categories, favourites, user presets
+class Browser : public Page, private juce::ListBoxModel
+{
+public:
+    Browser (LumenSynthProcessor& p) : proc (p)
+    {
+        search.setTextToShowWhenEmpty ("SEARCH PRESETS...", C::dim);
+        search.setColour (juce::TextEditor::backgroundColourId, juce::Colour (0xff030508));
+        search.setColour (juce::TextEditor::outlineColourId, C::border);
+        search.setColour (juce::TextEditor::focusedOutlineColourId, C::cyan);
+        search.setColour (juce::TextEditor::textColourId, C::cyan);
+        search.setFont (font (14.0f));
+        search.onTextChange = [this] { refilter(); };
+        addAndMakeVisible (search);
+        juce::StringArray cats { "ALL", "FAVOURITES", "USER", "BASS", "LEAD", "PLUCK", "PAD", "KEYS", "FX" };
+        cats.set (1, juce::String (juce::CharPointer_UTF8 ("\xe2\x98\x85")) + " FAVOURITES");
+        for (int i = 0; i < cats.size(); ++i)
+        {
+            auto* b = catBtns.add (new juce::TextButton (cats[i]));
+            b->setColour (juce::TextButton::buttonColourId, i == 1 ? C::amber : C::cyan);
+            b->onClick = [this, i] { cat = i; refilter(); };
+            addAndMakeVisible (b);
+        }
+        list.setModel (this);
+        list.setRowHeight (26);
+        list.setColour (juce::ListBox::backgroundColourId, juce::Colour (0xff030508));
+        list.setColour (juce::ListBox::outlineColourId, C::border);
+        list.setOutlineThickness (1);
+        addAndMakeVisible (list);
+        for (auto* b : { &loadBtn, &delBtn, &closeBtn }) addAndMakeVisible (*b);
+        loadBtn.setColour (juce::TextButton::buttonColourId, C::green);
+        delBtn.setColour (juce::TextButton::buttonColourId, C::red);
+        closeBtn.setColour (juce::TextButton::buttonColourId, C::dim.brighter (0.5f));
+        loadBtn.onClick = [this] { loadSelected(); };
+        delBtn.onClick = [this]
+        {
+            const int r = list.getSelectedRow();
+            if (! juce::isPositiveAndBelow (r, (int) shown.size()) || ! shown[(size_t) r].user) return;
+            const auto e = shown[(size_t) r];
+            juce::AlertWindow::showAsync (juce::MessageBoxOptions().withIconType (juce::MessageBoxIconType::QuestionIcon).withTitle ("Delete preset")
+                                              .withMessage ("Delete \"" + e.name + "\"?").withButton ("Delete").withButton ("Cancel").withAssociatedComponent (this),
+                                          [this, e] (int res) { if (res == 1) { proc.deleteUserPreset (e); refresh(); } });
+        };
+        closeBtn.onClick = [this] { setVisible (false); };
+    }
+    void refresh() { all = proc.listPresets(); refilter(); }
+    void resized() override
+    {
+        search.setBounds (180, 10, 600, 30);
+        for (int i = 0; i < catBtns.size(); ++i) catBtns[i]->setBounds (10, 50 + i * 36, 160, 30);
+        list.setBounds (180, 50, 838, 310);
+        loadBtn.setBounds (180, 370, 140, 32);
+        delBtn.setBounds (330, 370, 110, 32);
+        closeBtn.setBounds (908, 370, 110, 32);
+    }
+    void paint (juce::Graphics& g) override
+    {
+        g.setColour (juce::Colour (0xff06080c)); g.fillRoundedRectangle (getLocalBounds().toFloat(), 10.0f);
+        dotGrid (g, getLocalBounds().toFloat().reduced (6.0f), 9.0f, juce::Colours::white, 0.03f);
+        g.setColour (C::cyan.withAlpha (0.5f)); g.drawRoundedRectangle (getLocalBounds().toFloat().reduced (0.5f), 10.0f, 1.2f);
+        g.setFont (font (11.5f)); g.setColour (C::cyan);
+        g.drawText ("PRESET BROWSER", 10, 14, 160, 20, juce::Justification::centredLeft);
+        g.setFont (font (10.0f)); g.setColour (C::dim);
+        g.drawText (juce::String ((int) shown.size()) + " PRESETS  -  DOUBLE-CLICK TO LOAD  -  CLICK THE STAR FOR FAVOURITES", 460, 376, 440, 20, juce::Justification::centredLeft);
+        g.setFont (font (9.0f));
+        g.drawFittedText ("YOUR PRESETS ARE SAVED IN\nDocuments / Lumen Audio / Lumen Synth / Presets", juce::Rectangle<int> (792, 8, 226, 34), juce::Justification::centredRight, 2);
+    }
+    // ListBoxModel
+    int getNumRows() override { return (int) shown.size(); }
+    void paintListBoxItem (int row, juce::Graphics& g, int w, int h, bool sel) override
+    {
+        if (! juce::isPositiveAndBelow (row, (int) shown.size())) return;
+        const auto& e = shown[(size_t) row];
+        if (sel) { g.setColour (C::cyan.withAlpha (0.15f)); g.fillRect (0, 0, w, h); }
+        const bool fav = proc.isFavourite (e);
+        g.setFont (juce::Font (juce::FontOptions (16.0f)));
+        g.setColour (fav ? C::amber : C::dim.withAlpha (0.6f));
+        g.drawText (juce::CharPointer_UTF8 (fav ? "\xe2\x98\x85" : "\xe2\x98\x86"), 6, 0, 22, h, juce::Justification::centred);
+        g.setFont (font (13.0f)); g.setColour (sel ? juce::Colours::white : C::text);
+        g.drawText (e.name, 36, 0, w - 260, h, juce::Justification::centredLeft);
+        g.setFont (font (10.0f)); g.setColour (C::magenta.withAlpha (0.85f));
+        g.drawText (e.category.toUpperCase(), w - 220, 0, 110, h, juce::Justification::centredLeft);
+        g.setColour (e.user ? C::green : C::dim);
+        g.drawText (e.user ? "USER" : "FACTORY", w - 100, 0, 90, h, juce::Justification::centredRight);
+        g.setColour (C::border); g.drawHorizontalLine (h - 1, 0.0f, (float) w);
+    }
+    void listBoxItemClicked (int row, const juce::MouseEvent& e) override
+    {
+        if (e.x < 30 && juce::isPositiveAndBelow (row, (int) shown.size())) { proc.toggleFavourite (shown[(size_t) row]); list.repaintRow (row); if (cat == 1) refilter(); }
+    }
+    void listBoxItemDoubleClicked (int, const juce::MouseEvent&) override { loadSelected(); }
+    void returnKeyPressed (int) override { loadSelected(); }
+
+private:
+    void loadSelected()
+    {
+        const int r = list.getSelectedRow();
+        if (juce::isPositiveAndBelow (r, (int) shown.size())) proc.loadPresetEntry (shown[(size_t) r]);
+    }
+    void refilter()
+    {
+        shown.clear();
+        const auto q = search.getText().trim().toLowerCase();
+        static const char* catNames[] = { "", "", "", "Bass", "Lead", "Pluck", "Pad", "Keys", "FX" };
+        for (auto& e : all)
+        {
+            if (q.isNotEmpty() && ! e.name.toLowerCase().contains (q) && ! e.category.toLowerCase().contains (q)) continue;
+            if (cat == 1 && ! proc.isFavourite (e)) continue;
+            if (cat == 2 && ! e.user) continue;
+            if (cat >= 3 && ! e.category.equalsIgnoreCase (catNames[cat])) continue;
+            shown.push_back (e);
+        }
+        list.updateContent(); list.repaint();
+        for (int i = 0; i < catBtns.size(); ++i) catBtns[i]->setAlpha (i == cat ? 1.0f : 0.55f);
+        repaint();
+    }
+    LumenSynthProcessor& proc;
+    juce::TextEditor search;
+    juce::OwnedArray<juce::TextButton> catBtns;
+    juce::ListBox list;
+    juce::TextButton loadBtn { "LOAD" }, delBtn { "DELETE" }, closeBtn { "CLOSE" };
+    std::vector<LumenSynthProcessor::PresetEntry> all, shown;
+    int cat = 0;
 };
 } // namespace
 
@@ -684,7 +1253,6 @@ void LedKeyboard::drawWhiteNote (int note, juce::Graphics& g, juce::Rectangle<fl
         juce::ColourGradient lit (C::cyan.withAlpha (0.75f), r.getX(), r.getY(), C::cyan.withAlpha (0.15f), r.getX(), r.getBottom(), false);
         g.setGradientFill (lit); g.fillRoundedRectangle (r.withTrimmedTop (-4.0f), 3.0f);
     }
-    // LED at the bottom of each key
     drawLed (g, { r.getCentreX(), r.getBottom() - 9.0f }, 2.3f, C::cyan, down ? 1.0f : 0.0f);
     g.setColour (juce::Colours::black); g.drawVerticalLine ((int) area.getRight(), area.getY(), area.getBottom());
     if (note % 12 == 0)
@@ -715,51 +1283,93 @@ LumenSynthEditor::LumenSynthEditor (LumenSynthProcessor& p)
     : AudioProcessorEditor (&p), proc (p), keyboard (p.keyboardState)
 {
     setLookAndFeel (&lnf);
-    pages[0] = std::make_unique<OscPage> (proc.apvts);
-    pages[1] = std::make_unique<FilterPage> (proc.apvts);
-    pages[2] = std::make_unique<ModPage> (proc.apvts, proc);
-    pages[3] = std::make_unique<FxPage> (proc.apvts, proc);
-    for (auto& pg : pages) addChildComponent (*pg);
-    smart  = std::make_unique<SmartPanel> (proc);
-    macros = std::make_unique<MacroPanel> (proc.apvts);
-    scope  = std::make_unique<ScopePanel> (proc);
-    addAndMakeVisible (*smart); addAndMakeVisible (*macros); addAndMakeVisible (*scope);
+    ModHost::current() = this;
+    addAndMakeVisible (root);
+    root.setBounds (0, 0, kW, kH);
 
-    const char* names[] = { "OSC", "FILTER / ENV", "MOD", "FX" };
-    const juce::Colour cols[] = { C::cyan, C::amber, C::green, C::magenta };
-    for (int i = 0; i < 4; ++i)
+    pages[0] = std::make_unique<OscPage> (proc);
+    pages[1] = std::make_unique<FilterPage> (proc.apvts);
+    pages[2] = std::make_unique<EnvPage> (proc, badges);
+    pages[3] = std::make_unique<LfoPage> (proc, badges);
+    pages[4] = std::make_unique<MatrixPage> (proc);
+    pages[5] = std::make_unique<FxPage> (proc);
+    pages[6] = std::make_unique<ArpPage> (proc);
+    for (auto& pg : pages) root.addChildComponent (*pg);
+    smart  = std::make_unique<SmartPanel> (proc);
+    macros = std::make_unique<MacroPanel> (proc.apvts, badges);
+    scope  = std::make_unique<ScopePanel> (proc);
+    browser = std::make_unique<Browser> (proc);
+    root.addAndMakeVisible (*smart); root.addAndMakeVisible (*macros); root.addAndMakeVisible (*scope);
+    root.addChildComponent (*browser);
+
+    const char* names[] = { "OSC", "FILTER", "ENV", "LFO", "MATRIX", "FX", "ARP" };
+    const juce::Colour cols[] = { C::cyan, C::amber, C::green, C::blue, C::green, C::magenta, C::cyan };
+    for (int i = 0; i < kPages; ++i)
     {
         tabs[i].setButtonText (names[i]);
         tabs[i].setColour (juce::TextButton::buttonColourId, cols[i]);
         tabs[i].onClick = [this, i] { showPage (i); };
-        addAndMakeVisible (tabs[i]);
+        root.addAndMakeVisible (tabs[i]);
     }
-    for (auto* b : { &prevBtn, &nextBtn }) { b->setColour (juce::TextButton::buttonColourId, C::cyan); addAndMakeVisible (*b); }
+    for (auto* b : { &prevBtn, &nextBtn }) { b->setColour (juce::TextButton::buttonColourId, C::cyan); root.addAndMakeVisible (*b); }
     prevBtn.onClick = [this] { stepPreset (-1); };
     nextBtn.onClick = [this] { stepPreset (1); };
-    presetArea.setColour (juce::TextButton::buttonColourId, juce::Colours::transparentBlack);
     presetArea.setAlpha (0.0f);
-    presetArea.onClick = [this] { showPresetMenu(); };
-    addAndMakeVisible (presetArea);
+    presetArea.onClick = [this] { static_cast<Browser*> (browser.get())->refresh(); browser->setVisible (! browser->isVisible()); browser->toFront (true); };
+    presetArea.setTooltip ("Open the preset browser");
+    root.addAndMakeVisible (presetArea);
+    browseBtn.setColour (juce::TextButton::buttonColourId, C::cyan);
+    saveBtn.setColour (juce::TextButton::buttonColourId, C::green);
+    browseBtn.onClick = presetArea.onClick;
+    saveBtn.onClick = [this] { openSaveDialog(); };
+    root.addAndMakeVisible (browseBtn); root.addAndMakeVisible (saveBtn);
+
+    hqToggle = std::make_unique<Toggle> (proc.apvts, "hq", "HQ", C::amber);
+    hqToggle->setTooltip ("HQ: oscillators and filters run at 2x sample rate (cleaner high notes / warps, ~2x CPU)");
+    root.addAndMakeVisible (*hqToggle);
+    zoom.addItemList ({ "75%", "100%", "125%", "150%" }, 1);
+    zoom.setColour (juce::ComboBox::textColourId, C::cyan);
+    zoom.setSelectedId (2, juce::dontSendNotification);
+    zoom.onChange = [this] { const float s[] = { 0.75f, 1.0f, 1.25f, 1.5f }; const float k = s[juce::jlimit (0, 3, zoom.getSelectedId() - 1)]; setSize ((int) (kW * k), (int) (kH * k)); };
+    root.addAndMakeVisible (zoom);
 
     keyboard.setAvailableRange (24, 108);
     keyboard.setLowestVisibleKey (24);
     keyboard.setScrollButtonsVisible (false);
     keyboard.setKeyPressBaseOctave (5);
-    addAndMakeVisible (keyboard);
+    root.addAndMakeVisible (keyboard);
 
+    collectKnobs (root);
     showPage (0);
-    setSize (1060, 720);
+    setResizable (true, true);
+    setResizeLimits (kW * 3 / 4, kH * 3 / 4, kW * 8 / 5, kH * 8 / 5);
+    if (auto* c = getConstrainer()) c->setFixedAspectRatio ((double) kW / kH);
+    setSize (kW, kH);
     startTimerHz (30);
 }
 
-LumenSynthEditor::~LumenSynthEditor() { stopTimer(); setLookAndFeel (nullptr); }
+LumenSynthEditor::~LumenSynthEditor()
+{
+    stopTimer();
+    if (ModHost::current() == this) ModHost::current() = nullptr;
+    setLookAndFeel (nullptr);
+}
+
+void LumenSynthEditor::collectKnobs (juce::Component& c)
+{
+    for (auto* ch : c.getChildren())
+    {
+        if (auto* k = dynamic_cast<Knob*> (ch)) { if (k->modDest() > 0) knobs.push_back (k); }
+        else collectKnobs (*ch);
+    }
+}
 
 void LumenSynthEditor::showPage (int idx)
 {
     currentPage = idx;
-    for (int i = 0; i < 4; ++i) pages[i]->setVisible (i == idx);
-    repaint (0, 64, getWidth(), 40);
+    for (int i = 0; i < kPages; ++i) pages[i]->setVisible (i == idx);
+    browser->setVisible (false);
+    root.repaint (0, 64, kW, 40);
 }
 
 void LumenSynthEditor::stepPreset (int delta)
@@ -768,53 +1378,67 @@ void LumenSynthEditor::stepPreset (int delta)
     proc.setCurrentProgram ((proc.getCurrentProgram() + delta + n) % n);
 }
 
-void LumenSynthEditor::showPresetMenu()
+void LumenSynthEditor::openSaveDialog()
 {
-    juce::PopupMenu menu;
-    const auto& pr = lumen::synth::factoryPresets();
-    for (auto& cat : lumen::synth::categories())
+    saveWindow = std::make_unique<juce::AlertWindow> ("Save preset", "Name and category for your preset:", juce::MessageBoxIconType::NoIcon, this);
+    saveWindow->addTextEditor ("name", proc.getPresetName().upToFirstOccurrenceOf (" *", false, false), "Name:");
+    saveWindow->addComboBox ("cat", categories(), "Category:");
+    if (auto* cb = saveWindow->getComboBoxComponent ("cat"))
     {
-        juce::PopupMenu sub;
-        for (int i = 0; i < (int) pr.size(); ++i)
-            if (pr[(size_t) i].category == cat) sub.addItem (i + 1, pr[(size_t) i].name, true, i == proc.getCurrentProgram());
-        menu.addSubMenu (cat, sub);
+        const int idx = categories().indexOf (proc.getPresetCategory());
+        cb->setSelectedItemIndex (juce::jmax (0, idx));
     }
-    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&presetArea),
-                        [this] (int r) { if (r > 0) proc.setCurrentProgram (r - 1); });
+    saveWindow->addButton ("Save", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    saveWindow->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    saveWindow->enterModalState (true, juce::ModalCallbackFunction::create ([this] (int r)
+    {
+        if (r == 1 && saveWindow != nullptr)
+        {
+            const auto name = saveWindow->getTextEditorContents ("name");
+            const auto cat = saveWindow->getComboBoxComponent ("cat")->getText();
+            if (! proc.saveUserPreset (name, cat))
+                juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "Lumen Synth", "Could not save the preset.");
+        }
+        saveWindow.reset();
+    }), false);
 }
 
 void LumenSynthEditor::resized()
 {
+    const float s = (float) getWidth() / (float) kW;
+    root.setTransform (juce::AffineTransform::scale (s));
     for (auto& pg : pages) pg->setBounds (16, 104, 748, 412);
     smart->setBounds (776, 104, 268, 196);
-    macros->setBounds (776, 308, 268, 112);
-    scope->setBounds (776, 428, 268, 88);
-    for (int i = 0; i < 4; ++i) tabs[i].setBounds (16 + i * 124, 70, 118, 28);
-    prevBtn.setBounds (306, 18, 30, 30);
-    nextBtn.setBounds (704, 18, 30, 30);
-    presetArea.setBounds (340, 10, 360, 46);
+    macros->setBounds (776, 308, 268, 118);
+    scope->setBounds (776, 434, 268, 82);
+    browser->setBounds (16, 104, 1028, 412);
+    for (int i = 0; i < kPages; ++i) tabs[i].setBounds (16 + i * 106, 70, 100, 28);
+    hqToggle->setBounds (776, 72, 74, 24);
+    zoom.setBounds (968, 72, 76, 24);
+    prevBtn.setBounds (296, 18, 30, 30);
+    nextBtn.setBounds (654, 18, 30, 30);
+    presetArea.setBounds (330, 10, 320, 46);
+    browseBtn.setBounds (692, 9, 62, 22);
+    saveBtn.setBounds (692, 35, 62, 22);
     keyboard.setBounds (16, 528, 1028, 180);
     keyboard.setKeyWidth (1028.0f / 50.0f);
     keyboard.setBlackNoteLengthProportion (0.6f);
 }
 
-void LumenSynthEditor::paint (juce::Graphics& g)
+void LumenSynthEditor::paintContent (juce::Graphics& g)
 {
     g.fillAll (C::bg);
-    dotGrid (g, getLocalBounds().toFloat(), 9.0f, juce::Colours::white, 0.035f);
-    // vignette
-    juce::ColourGradient vig (juce::Colours::transparentBlack, getWidth() * 0.5f, getHeight() * 0.4f, juce::Colours::black.withAlpha (0.55f), 0.0f, 0.0f, true);
-    g.setGradientFill (vig); g.fillRect (getLocalBounds());
+    dotGrid (g, juce::Rectangle<float> (0, 0, (float) kW, (float) kH), 9.0f, juce::Colours::white, 0.035f);
+    juce::ColourGradient vig (juce::Colours::transparentBlack, kW * 0.5f, kH * 0.4f, juce::Colours::black.withAlpha (0.55f), 0.0f, 0.0f, true);
+    g.setGradientFill (vig); g.fillRect (0, 0, kW, kH);
 
-    // ---- header ----
     juce::ColourGradient hg (juce::Colour (0xff0c1119), 0, 0, juce::Colour (0xff06080c), 0, 64, false);
-    g.setGradientFill (hg); g.fillRect (0, 0, getWidth(), 64);
-    juce::ColourGradient line (C::cyan.withAlpha (0.0f), 0, 64, C::cyan.withAlpha (0.0f), (float) getWidth(), 64, false);
+    g.setGradientFill (hg); g.fillRect (0, 0, kW, 64);
+    juce::ColourGradient line (C::cyan.withAlpha (0.0f), 0, 64, C::cyan.withAlpha (0.0f), (float) kW, 64, false);
     line.addColour (0.3, C::cyan.withAlpha (0.7f)); line.addColour (0.7, C::magenta.withAlpha (0.7f));
-    g.setGradientFill (line); g.fillRect (0, 63, getWidth(), 2);
-    g.setGradientFill (line); g.setOpacity (0.25f); g.fillRect (0, 60, getWidth(), 8); g.setOpacity (1.0f);
+    g.setGradientFill (line); g.fillRect (0, 63, kW, 2);
+    g.setGradientFill (line); g.setOpacity (0.25f); g.fillRect (0, 60, kW, 8); g.setOpacity (1.0f);
 
-    // logo with glow
     {
         juce::GlyphArrangement ga; ga.addLineOfText (font (32.0f), "LUMEN", 20.0f, 40.0f);
         juce::Path lp; ga.createPath (lp);
@@ -822,48 +1446,93 @@ void LumenSynthEditor::paint (juce::Graphics& g)
         g.setColour (C::cyan.withAlpha (0.25f)); g.strokePath (lp, juce::PathStrokeType (2.5f));
         juce::ColourGradient lg (C::cyan, 20, 0, C::magenta, 140, 0, false);
         g.setGradientFill (lg); g.fillPath (lp);
-        logoMatrix.draw (g, { 150.0f, 18.0f, 120.0f, 28.0f }, "SYNTH", C::magenta, 2.6f, juce::Justification::centredLeft, false, 10.5f);
+        logoMatrix.draw (g, { 150.0f, 14.0f, 130.0f, 28.0f }, "SYNTH 2", C::magenta, 2.4f, juce::Justification::centredLeft, false, 10.5f);
     }
-
-    // preset display
     {
-        auto d = juce::Rectangle<float> (300.0f, 8.0f, 440.0f, 50.0f);
+        auto d = juce::Rectangle<float> (290.0f, 8.0f, 400.0f, 50.0f);
         lcd (g, d, C::cyan);
         dotGrid (g, d.reduced (4.0f), 3.0f, C::cyan, 0.05f);
-        const auto& pr = lumen::synth::factoryPresets();
-        nameMatrix.draw (g, { 342.0f, 22.0f, 356.0f, 30.0f }, proc.getPresetName(), C::cyan, 2.45f, juce::Justification::centred, true, 10.6f);
+        nameMatrix.draw (g, { 332.0f, 22.0f, 316.0f, 30.0f }, proc.getPresetName(), C::cyan, 2.2f, juce::Justification::centred, true, 10.6f);
         g.setFont (font (9.5f)); g.setColour (C::magenta.withAlpha (0.9f));
-        g.drawText (proc.getPresetCategory().toUpperCase(), 344, 10, 150, 12, juce::Justification::centredLeft);
-        g.setColour (C::dim);
-        g.drawText (juce::String (proc.getCurrentProgram() + 1) + " / " + juce::String ((int) pr.size()), 546, 10, 150, 12, juce::Justification::centredRight);
+        g.drawText (proc.getPresetCategory().toUpperCase(), 334, 10, 150, 12, juce::Justification::centredLeft);
+        g.setColour (proc.isUserPreset() ? C::green : C::dim);
+        g.drawText (proc.isUserPreset() ? juce::String ("USER") : juce::String (proc.getCurrentProgram() + 1) + " / " + juce::String (proc.getNumPrograms()),
+                    496, 10, 150, 12, juce::Justification::centredRight);
     }
-
-    // voice LEDs
     g.setFont (font (9.5f)); g.setColour (C::text.withAlpha (0.6f));
-    g.drawText ("VOICES  " + juce::String (proc.activeVoices.load()), 760, 10, 140, 12, juce::Justification::centredLeft);
+    g.drawText ("VOICES  " + juce::String (proc.activeVoices.load()), 770, 10, 130, 12, juce::Justification::centredLeft);
     for (int i = 0; i < 16; ++i)
-        drawLed (g, { 766.0f + (i % 8) * 16.0f, 32.0f + (i / 8) * 14.0f }, 3.6f, i < 8 ? C::cyan : C::magenta, voiceLv[i]);
-    // output meter
+        drawLed (g, { 776.0f + (i % 8) * 15.0f, 32.0f + (i / 8) * 14.0f }, 3.4f, i < 8 ? C::cyan : C::magenta, voiceLv[i]);
     g.setColour (C::text.withAlpha (0.6f));
     g.drawText ("OUTPUT", 912, 10, 132, 12, juce::Justification::centredLeft);
     ledMeter (g, { 912.0f, 28.0f, 132.0f, 9.0f }, meterL, holdL, false, 22);
     ledMeter (g, { 912.0f, 42.0f, 132.0f, 9.0f }, meterR, holdR, false, 22);
 
-    // tab LEDs
-    const juce::Colour cols[] = { C::cyan, C::amber, C::green, C::magenta };
-    for (int i = 0; i < 4; ++i)
+    const juce::Colour cols[] = { C::cyan, C::amber, C::green, C::blue, C::green, C::magenta, C::cyan };
+    for (int i = 0; i < kPages; ++i)
     {
-        drawLed (g, { 16.0f + i * 124.0f + 12.0f, 84.0f }, 3.0f, cols[i], i == currentPage ? 1.0f : 0.0f);
+        drawLed (g, { 16.0f + i * 106.0f + 11.0f, 84.0f }, 2.8f, cols[i], i == currentPage ? 1.0f : 0.0f);
         if (i == currentPage)
         {
-            g.setColour (cols[i].withAlpha (0.8f)); g.fillRect (16.0f + i * 124.0f + 10.0f, 99.0f, 98.0f, 2.0f);
-            g.setColour (cols[i].withAlpha (0.2f)); g.fillRect (16.0f + i * 124.0f + 6.0f, 97.0f, 106.0f, 6.0f);
+            g.setColour (cols[i].withAlpha (0.8f)); g.fillRect (16.0f + i * 106.0f + 8.0f, 99.0f, 84.0f, 2.0f);
+            g.setColour (cols[i].withAlpha (0.2f)); g.fillRect (16.0f + i * 106.0f + 4.0f, 97.0f, 92.0f, 6.0f);
         }
     }
-    g.setFont (font (9.5f)); g.setColour (C::dim);
-    g.drawText ("LUMEN AUDIO  -  WAVETABLE SYNTHESIZER", 520, 76, 244, 14, juce::Justification::centredRight);
+    g.setFont (font (9.0f)); g.setColour (C::dim);
+    g.drawText ("ZOOM", 930, 72, 36, 24, juce::Justification::centredRight);
 }
 
+//==============================================================================
+// ModHost
+std::vector<ModRing> LumenSynthEditor::ringsFor (int dst)
+{
+    std::vector<ModRing> r;
+    for (auto& m : proc.modsForDest (dst))
+        if (std::abs (m.amt) > 1.0e-4f)
+            r.push_back ({ m.slot, m.amt, proc.modSourceValue (m.src), sourceColour (m.src) });
+    return r;
+}
+
+void LumenSynthEditor::dropMod (int src, int dst)
+{
+    const int slot = proc.assignMod (src, dst, isBipolarSrc (src) ? 0.3f : 0.5f);
+    if (slot < 0)
+        juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, "Lumen Synth", "All 16 modulation slots are in use. Clear one in the MATRIX page.");
+    ringCounter = 0;
+}
+
+void LumenSynthEditor::knobMenu (int dst, juce::Component* target)
+{
+    juce::PopupMenu menu;
+    menu.addSectionHeader ("MODULATION  -  " + modDests()[dst].toUpperCase());
+    const auto mods = proc.modsForDest (dst);
+    for (auto& m : mods)
+    {
+        juce::PopupMenu sub;
+        const float amts[] = { 1.0f, 0.5f, 0.25f, 0.1f, -0.1f, -0.25f, -0.5f, -1.0f };
+        for (int i = 0; i < 8; ++i) sub.addItem (1000 + m.slot * 20 + i, (amts[i] > 0 ? "+" : "") + juce::String ((int) (amts[i] * 100)) + "%", true, std::abs (m.amt - amts[i]) < 0.005f);
+        sub.addSeparator();
+        sub.addItem (1000 + m.slot * 20 + 19, "Remove");
+        menu.addSubMenu (modSources()[m.src] + "  (" + juce::String ((int) std::round (m.amt * 100)) + "%)", sub);
+    }
+    if (! mods.empty()) menu.addSeparator();
+    juce::PopupMenu addMenu;
+    for (int s = 1; s < kNumSrc; ++s) addMenu.addItem (100 + s, modSources()[s]);
+    menu.addSubMenu ("Add modulation", addMenu);
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (target), [this, dst] (int r)
+    {
+        if (r >= 1000)
+        {
+            const int slot = (r - 1000) / 20, k = (r - 1000) % 20;
+            const float amts[] = { 1.0f, 0.5f, 0.25f, 0.1f, -0.1f, -0.25f, -0.5f, -1.0f };
+            if (k == 19) proc.clearModSlot (slot); else if (k < 8) proc.setModAmount (slot, amts[k]);
+        }
+        else if (r > 100) dropMod (r - 100, dst);
+        ringCounter = 0;
+    });
+}
+
+//==============================================================================
 void LumenSynthEditor::timerCallback()
 {
     const float l = proc.peakL.load(), r = proc.peakR.load();
@@ -871,8 +1540,19 @@ void LumenSynthEditor::timerCallback()
     if (++holdTimer > 40) { holdTimer = 0; holdL = holdR = 0.0f; }
     holdL = juce::jmax (holdL, l); holdR = juce::jmax (holdR, r);
     for (int i = 0; i < 16; ++i) voiceLv[i] = juce::jmax (proc.voiceLevel[i].load(), voiceLv[i] * 0.7f);
-    repaint (756, 6, 292, 54);
-    if (proc.presetVersion.load() != lastPresetVersion) { lastPresetVersion = proc.presetVersion.load(); repaint (300, 8, 440, 50); }
+    root.repaint (766, 6, 282, 54);
+    if (proc.presetVersion.load() != lastPresetVersion) { lastPresetVersion = proc.presetVersion.load(); root.repaint (290, 8, 400, 50); ringCounter = 0; }
     pages[currentPage]->tick();
     smart->tick(); scope->tick();
+    for (auto* b : badges) b->setLevel (isBipolarSrc (b->source()) ? 0.5f + 0.5f * proc.modSourceValue (b->source()) : proc.modSourceValue (b->source()));
+
+    // mod rings: refresh the assignment list a few times per second, animate the live dots every frame
+    const bool refresh = (ringCounter++ % 6) == 0;
+    for (auto* k : knobs)
+    {
+        if (! k->isShowing()) continue;
+        const bool had = k->hasRings();
+        if (refresh) k->refreshRings();
+        if (had || k->hasRings()) { if (! refresh) k->refreshRings(); k->repaint(); }
+    }
 }

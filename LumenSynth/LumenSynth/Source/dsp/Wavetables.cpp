@@ -7,10 +7,10 @@ namespace lumen
 static constexpr double kTwoPi = 6.283185307179586;
 
 static const char* const kNames[] = { "Basic Shapes", "Saw Stack", "PWM", "Vox Formant", "Hard Sync",
-                                      "FM Growl", "Phase Res", "Organ", "Fold", nullptr };
+                                      "FM Growl", "Phase Res", "Organ", "Fold", "Spectral", "Dirty Saw", "Metal FM", nullptr };
 
 const char* const* WavetableBank::names() { return kNames; }
-int WavetableBank::numTables() { return 9; }
+int WavetableBank::numTables() { return 12; }
 
 const WavetableBank& WavetableBank::get()
 {
@@ -18,15 +18,14 @@ const WavetableBank& WavetableBank::get()
     return bank;
 }
 
-// --------------------------------------------------------------------------------------
-// Naive (not band-limited) single-cycle generators. t = morph position 0..1, p = phase 0..1
+//==============================================================================
 static double saw (double p) { return 2.0 * (p - std::floor (p)) - 1.0; }
 
 static double genTime (int table, double t, double p)
 {
     switch (table)
     {
-        case 0: // Basic: sine -> triangle -> saw -> square
+        case 0:
         {
             const double s = std::sin (kTwoPi * p);
             const double tri = 1.0 - 4.0 * std::abs (p - std::floor (p + 0.75) + 0.25);
@@ -36,35 +35,21 @@ static double genTime (int table, double t, double p)
             if (t < 2.0 / 3.0) { const double k = (t - 1.0 / 3.0) * 3.0; return tri + (sw - tri) * k; }
             const double k = (t - 2.0 / 3.0) * 3.0; return sw + (sq - sw) * k;
         }
-        case 1: // Saw stack: saw + octave + fifth layers fade in
-            return saw (p) + t * 0.6 * saw (2.0 * p) + t * t * 0.4 * saw (3.0 * p) + t * t * 0.25 * saw (4.0 * p);
-        case 2: // PWM 50% -> 5%
-        {
-            const double w = 0.5 - 0.45 * t;
-            return (p - std::floor (p)) < w ? 1.0 : -1.0;
-        }
-        case 4: // Hard sync sweep: slave saw ratio 1 -> 8
-            return saw ((1.0 + 7.0 * t) * p);
-        case 5: // FM growl: carrier 1, modulator 2, index 0 -> 9
-            return std::sin (kTwoPi * p + 9.0 * t * std::sin (kTwoPi * 2.0 * p) + 2.0 * t * std::sin (kTwoPi * p));
-        case 6: // Phase resonance (CZ style): decaying resonant burst inside each cycle
-        {
-            const double r = 1.0 + 15.0 * t;
-            return (1.0 - p) * std::sin (kTwoPi * p * r) * 1.0 + (1.0 - t) * std::sin (kTwoPi * p) * 0.3;
-        }
-        case 8: // Fold: sine driven into a wavefolder
-        {
-            const double g = 1.0 + 7.0 * t;
-            return std::sin (g * std::sin (kTwoPi * p) * 1.5707963);
-        }
+        case 1:  return saw (p) + t * 0.6 * saw (2.0 * p) + t * t * 0.4 * saw (3.0 * p) + t * t * 0.25 * saw (4.0 * p);
+        case 2:  { const double w = 0.5 - 0.45 * t; return (p - std::floor (p)) < w ? 1.0 : -1.0; }
+        case 4:  return saw ((1.0 + 7.0 * t) * p);
+        case 5:  return std::sin (kTwoPi * p + 9.0 * t * std::sin (kTwoPi * 2.0 * p) + 2.0 * t * std::sin (kTwoPi * p));
+        case 6:  { const double r = 1.0 + 15.0 * t; return (1.0 - p) * std::sin (kTwoPi * p * r) + (1.0 - t) * std::sin (kTwoPi * p) * 0.3; }
+        case 8:  { const double g = 1.0 + 7.0 * t; return std::sin (g * std::sin (kTwoPi * p) * 1.5707963); }
+        case 10: { const double g = 1.0 + 12.0 * t; return std::tanh (g * (saw (p) + 0.3 * t)) - std::tanh (g * 0.3 * t); }
+        case 11: return std::sin (kTwoPi * p + (1.0 + 7.0 * t) * std::sin (kTwoPi * 3.0 * p) + 3.0 * t * std::sin (kTwoPi * 5.0 * p));
         default: return 0.0;
     }
 }
 
-// Spectral generators (harmonic amplitudes) for additive tables. Returns amplitude of harmonic k.
 static double genHarm (int table, double t, int k)
 {
-    if (table == 3) // Vox: morph through vowels a -> e -> i -> o -> u, formants relative to ~110 Hz fundamental
+    if (table == 3)
     {
         static const double F[5][3] = { { 800, 1150, 2900 }, { 400, 1600, 2700 }, { 270, 2100, 3000 },
                                         { 450, 800, 2830 },  { 325, 700, 2530 } };
@@ -81,7 +66,7 @@ static double genHarm (int table, double t, int k)
         }
         return (amp + 0.02) / std::sqrt ((double) k);
     }
-    if (table == 7) // Organ drawbars: 16', 8', 5 1/3', 4', 2 2/3', 2', 1 3/5', 1 1/3', 1'
+    if (table == 7)
     {
         static const int h[] = { 1, 2, 3, 4, 6, 8, 10, 12, 16 };
         static const double base[] = { 1.0, 0.8, 0.0, 0.5, 0.0, 0.3, 0.0, 0.0, 0.0 };
@@ -90,72 +75,164 @@ static double genHarm (int table, double t, int k)
             if (h[i] == k) return base[i] + (full[i] - base[i]) * t;
         return 0.0;
     }
+    if (table == 9)   // Spectral: brightness sweep with a resonant peak riding the edge
+    {
+        const double edge = 2.0 + std::pow (t, 1.6) * 120.0;
+        const double roll = 1.0 / (1.0 + std::pow ((double) k / edge, 6.0));
+        const double peak = 2.5 * std::exp (-0.5 * std::pow (((double) k - edge) / (0.08 * edge + 1.0), 2.0));
+        return (roll + peak) / (double) k;
+    }
     return 0.0;
 }
 
+static bool isAdditive (int t) { return t == 3 || t == 7 || t == 9; }
+
+//==============================================================================
+// Band-limit a set of full-band spectra into mip levels.
+static void buildMips (Table& tb, std::vector<std::vector<float>>& spectra, bool normalise)
+{
+    juce::dsp::FFT fft (11);
+    const int N = Table::kSize;
+    tb.data.assign ((size_t) tb.frames * Table::kMips * N, 0.0f);
+    std::vector<float> work ((size_t) 2 * N);
+    for (int fr = 0; fr < tb.frames; ++fr)
+    {
+        auto& spec = spectra[(size_t) fr];
+        spec[0] = spec[1] = 0.0f;   // DC
+        float peak = 0.0f;
+        std::vector<float> mips ((size_t) Table::kMips * N);
+        for (int m = 0; m < Table::kMips; ++m)
+        {
+            const int maxH = 1024 >> m;
+            work = spec;
+            for (int k = maxH + 1; k < N; ++k) { work[(size_t) (2 * k)] = 0.0f; work[(size_t) (2 * k + 1)] = 0.0f; }
+            fft.performRealOnlyInverseTransform (work.data());
+            for (int i = 0; i < N; ++i)
+            {
+                mips[(size_t) (m * N + i)] = work[(size_t) i];
+                if (m == 0) peak = std::max (peak, std::abs (work[(size_t) i]));
+            }
+        }
+        float norm = 1.0f;
+        if (normalise) norm = peak > 1.0e-9f ? std::min (1.0f / peak, 15.85f) : 1.0f;
+        for (int m = 0; m < Table::kMips; ++m)
+        {
+            float* dst = tb.data.data() + (((size_t) fr * Table::kMips + (size_t) m) * N);
+            for (int i = 0; i < N; ++i) dst[i] = mips[(size_t) (m * N + i)] * norm;
+        }
+    }
+}
+
+std::shared_ptr<Table> Table::fromCycles (const std::vector<float>& cycles, int frames, const std::string& name)
+{
+    auto tb = std::make_shared<Table>();
+    tb->frames = std::clamp (frames, 1, 256);
+    tb->name = name;
+    tb->source.assign (cycles.begin(), cycles.begin() + (std::ptrdiff_t) std::min (cycles.size(), (size_t) tb->frames * kSize));
+    tb->source.resize ((size_t) tb->frames * kSize, 0.0f);
+    juce::dsp::FFT fft (11);
+    std::vector<std::vector<float>> spectra ((size_t) tb->frames, std::vector<float> ((size_t) 2 * kSize, 0.0f));
+    for (int f = 0; f < tb->frames; ++f)
+    {
+        auto& s = spectra[(size_t) f];
+        double mean = 0.0;
+        for (int i = 0; i < kSize; ++i) mean += tb->source[(size_t) (f * kSize + i)];
+        mean /= kSize;
+        for (int i = 0; i < kSize; ++i) s[(size_t) i] = (float) (tb->source[(size_t) (f * kSize + i)] - mean);
+        fft.performRealOnlyForwardTransform (s.data());
+    }
+    buildMips (*tb, spectra, true);
+    return tb;
+}
+
+std::shared_ptr<Table> Table::fromAudio (const std::vector<float>& mono, const std::string& name)
+{
+    const size_t len = mono.size();
+    std::vector<float> cycles;
+    int frames = 1;
+    if (len >= (size_t) kSize && len % (size_t) kSize == 0)
+    {
+        const int total = (int) (len / (size_t) kSize);
+        frames = std::min (total, 256);
+        cycles.resize ((size_t) frames * kSize);
+        for (int f = 0; f < frames; ++f)
+        {
+            const int src = frames == total ? f : (int) std::lround ((double) f * (total - 1) / std::max (1, frames - 1));
+            std::copy (mono.begin() + (std::ptrdiff_t) src * kSize, mono.begin() + (std::ptrdiff_t) (src + 1) * kSize,
+                       cycles.begin() + (std::ptrdiff_t) f * kSize);
+        }
+    }
+    else if (len > (size_t) kSize)
+    {
+        frames = (int) std::clamp<size_t> (len / (size_t) kSize, 2, 64);
+        cycles.resize ((size_t) frames * kSize);
+        for (int f = 0; f < frames; ++f)
+        {
+            const size_t start = (size_t) ((double) f * (double) (len - (size_t) kSize) / (double) (frames - 1));
+            // short crossfade at the wrap point keeps the cycle continuous
+            for (int i = 0; i < kSize; ++i) cycles[(size_t) (f * kSize + i)] = mono[start + (size_t) i];
+            const int xf = 64;
+            for (int i = 0; i < xf; ++i)
+            {
+                const float w = (float) i / (float) xf;
+                auto& a = cycles[(size_t) (f * kSize + kSize - xf + i)];
+                a = a * (1.0f - w) + cycles[(size_t) (f * kSize + i)] * w;
+            }
+        }
+    }
+    else
+    {
+        // shorter than one frame: resample to a single cycle
+        frames = 1;
+        cycles.resize ((size_t) kSize);
+        for (int i = 0; i < kSize; ++i)
+        {
+            const double x = (double) i * (double) std::max<size_t> (1, len) / kSize;
+            const size_t i0 = std::min ((size_t) x, len > 0 ? len - 1 : 0);
+            const size_t i1 = std::min (i0 + 1, len > 0 ? len - 1 : 0);
+            const double fr = x - (double) i0;
+            cycles[(size_t) i] = len > 0 ? (float) (mono[i0] * (1.0 - fr) + mono[i1] * fr) : 0.0f;
+        }
+    }
+    return fromCycles (cycles, frames, name);
+}
+
+//==============================================================================
 WavetableBank::WavetableBank()
 {
-    const int nT = numTables();
-    data.assign ((size_t) nT * kFrames * kMips * kSize, 0.0f);
-
-    juce::dsp::FFT fft (11);                       // 2048
-    std::vector<float> spec (2 * kSize), work (2 * kSize);
-
-    for (int tb = 0; tb < nT; ++tb)
+    juce::dsp::FFT fft (11);
+    const int N = kSize;
+    for (int tb = 0; tb < numTables(); ++tb)
     {
-        const bool additive = (tb == 3 || tb == 7);
+        auto t = std::make_shared<Table>();
+        t->frames = kFrames;
+        t->name = kNames[tb];
+        std::vector<std::vector<float>> spectra ((size_t) kFrames, std::vector<float> ((size_t) 2 * N, 0.0f));
         for (int fr = 0; fr < kFrames; ++fr)
         {
-            const double t = (double) fr / (kFrames - 1);
-
-            // ---- full-band spectrum of this frame ----
-            std::fill (spec.begin(), spec.end(), 0.0f);
-            if (additive)
+            const double tt = (double) fr / (kFrames - 1);
+            auto& spec = spectra[(size_t) fr];
+            if (isAdditive (tb))
             {
-                // real-only FFT layout: [re0, im0, re1, im1, ...]; sine phase -> imaginary part
                 for (int k = 1; k <= 1023; ++k)
-                    spec[(size_t) (2 * k + 1)] = (float) (-genHarm (tb, t, k) * kSize * 0.5);
+                    spec[(size_t) (2 * k + 1)] = (float) (-genHarm (tb, tt, k) * N * 0.5);
             }
             else
             {
-                // supersample the naive waveform 8x then take the first 1024 harmonics (reduces aliasing in the source)
                 const int over = 8;
-                std::vector<double> big ((size_t) (kSize * over));
-                for (int i = 0; i < kSize * over; ++i) big[(size_t) i] = genTime (tb, t, (double) i / (kSize * over));
-                for (int i = 0; i < kSize; ++i)
+                std::vector<double> big ((size_t) (N * over));
+                for (int i = 0; i < N * over; ++i) big[(size_t) i] = genTime (tb, tt, (double) i / (N * over));
+                for (int i = 0; i < N; ++i)
                 {
                     double acc = 0.0;
                     for (int j = 0; j < over; ++j) acc += big[(size_t) (i * over + j)];
                     spec[(size_t) i] = (float) (acc / over);
                 }
                 fft.performRealOnlyForwardTransform (spec.data());
-                spec[0] = spec[1] = 0.0f;   // remove DC
-            }
-
-            // ---- mip levels ----
-            float peak = 0.0f;
-            std::vector<float> mips ((size_t) kMips * kSize);
-            for (int m = 0; m < kMips; ++m)
-            {
-                const int maxH = 1024 >> m;
-                work = spec;
-                for (int k = maxH + 1; k <= kSize / 2; ++k) { work[(size_t) (2 * k)] = 0.0f; work[(size_t) (2 * k + 1)] = 0.0f; }
-                // also clear the mirrored half if present
-                for (int k = kSize / 2 + 1; k < kSize; ++k) { work[(size_t) (2 * k)] = 0.0f; work[(size_t) (2 * k + 1)] = 0.0f; }
-                fft.performRealOnlyInverseTransform (work.data());
-                for (int i = 0; i < kSize; ++i)
-                {
-                    mips[(size_t) (m * kSize + i)] = work[(size_t) i];
-                    if (m == 0) peak = std::max (peak, std::abs (work[(size_t) i]));
-                }
-            }
-            const float norm = peak > 1.0e-9f ? 1.0f / peak : 1.0f;
-            for (int m = 0; m < kMips; ++m)
-            {
-                float* dst = data.data() + ((((size_t) tb * kFrames + (size_t) fr) * kMips + (size_t) m) * kSize);
-                for (int i = 0; i < kSize; ++i) dst[i] = mips[(size_t) (m * kSize + i)] * norm;
             }
         }
+        buildMips (*t, spectra, true);
+        tables.push_back (std::move (t));
     }
 }
 

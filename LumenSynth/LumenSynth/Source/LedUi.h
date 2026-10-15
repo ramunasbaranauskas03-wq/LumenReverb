@@ -289,11 +289,39 @@ inline juce::String formatValue (const synth::Spec& s, float v)
 }
 
 //==============================================================================
-class Knob : public juce::Component
+// Modulation host: implemented by the editor so knobs can show / accept modulation.
+struct ModRing { int slot; float amt; float live; juce::Colour col; };
+struct ModHost
+{
+    virtual ~ModHost() = default;
+    virtual std::vector<ModRing> ringsFor (int dst) = 0;
+    virtual void dropMod (int src, int dst) = 0;
+    virtual void knobMenu (int dst, juce::Component* target) = 0;
+    static ModHost*& current() { static ModHost* h = nullptr; return h; }
+};
+
+inline juce::Colour sourceColour (int src)
+{
+    static const juce::Colour cols[] = { C::dim, C::blue, C::violet, C::cyan, C::magenta, C::green, C::amber, C::magenta,
+                                         C::orange, C::text, C::text, C::text, C::cyan, C::magenta, C::amber, C::green, C::red, C::text };
+    return cols[juce::jlimit (0, 17, src)];
+}
+
+class Knob : public juce::Component, public juce::DragAndDropTarget
 {
 public:
+    struct ModSlider : public juce::Slider
+    {
+        std::function<void()> onMenu;
+        void mouseDown (const juce::MouseEvent& e) override
+        {
+            if (e.mods.isPopupMenu() && onMenu) { onMenu(); return; }
+            juce::Slider::mouseDown (e);
+        }
+    };
+
     Knob (juce::AudioProcessorValueTreeState& st, const juce::String& id, const juce::String& lbl, juce::Colour col, bool bipolar = false)
-        : label (lbl), spec (synth::findSpec (id))
+        : label (lbl), spec (synth::findSpec (id)), dst (synth::destForParam (id))
     {
         slider.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
         slider.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
@@ -305,8 +333,10 @@ public:
         att = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (st, id, slider);
         if (spec != nullptr) slider.setDoubleClickReturnValue (true, spec->def);
         slider.onValueChange = [this] { repaint(); };
+        slider.onMenu = [this] { if (dst > 0 && ModHost::current() != nullptr) ModHost::current()->knobMenu (dst, this); };
         slider.addMouseListener (this, false);
         colour = col;
+        if (dst > 0) slider.setTooltip ("Drag an LFO / ENV / MACRO badge here to modulate. Right-click for modulation options.");
     }
     void resized() override { slider.setBounds (getLocalBounds().withTrimmedBottom (15)); }
     void paint (juce::Graphics& g) override
@@ -321,15 +351,104 @@ public:
         }
         else { g.setColour (C::text.withAlpha (0.8f)); g.drawText (label, r, juce::Justification::centred); }
     }
+    void paintOverChildren (juce::Graphics& g) override
+    {
+        if (dragOver)
+        {
+            auto b = slider.getBounds().toFloat().reduced (2.0f);
+            g.setColour (C::green.withAlpha (0.25f)); g.fillEllipse (b);
+            g.setColour (C::green); g.drawEllipse (b, 1.5f);
+        }
+        if (rings.empty()) return;
+        auto b = slider.getBounds().toFloat();
+        const float size = juce::jmin (b.getWidth(), b.getHeight());
+        const auto c = b.getCentre();
+        const float R = size * 0.5f - 2.0f, rr = R * 0.70f;
+        const auto rp = slider.getRotaryParameters();
+        const float a0 = rp.startAngleRadians, a1 = rp.endAngleRadians;
+        const float pos = (float) slider.valueToProportionOfLength (slider.getValue());
+        float k = 0.0f;
+        for (auto& m : rings)
+        {
+            const float r2 = rr - k * 3.0f;
+            const float from = juce::jlimit (0.0f, 1.0f, pos), to = juce::jlimit (0.0f, 1.0f, pos + m.amt);
+            juce::Path arc;
+            arc.addCentredArc (c.x, c.y, r2, r2, 0.0f, a0 + from * (a1 - a0), a0 + to * (a1 - a0), true);
+            g.setColour (m.col.withAlpha (0.25f)); g.strokePath (arc, juce::PathStrokeType (4.0f));
+            g.setColour (m.col); g.strokePath (arc, juce::PathStrokeType (1.6f));
+            const float live = juce::jlimit (0.0f, 1.0f, pos + m.amt * m.live);
+            const float ang = a0 + live * (a1 - a0);
+            drawLed (g, { c.x + r2 * std::sin (ang), c.y - r2 * std::cos (ang) }, 2.2f, m.col, 1.0f);
+            k += 1.0f;
+        }
+    }
     void mouseEnter (const juce::MouseEvent&) override { repaint(); }
     void mouseExit (const juce::MouseEvent&) override  { repaint(); }
 
-    juce::Slider slider;
+    // drag & drop modulation
+    bool isInterestedInDragSource (const SourceDetails& d) override { return dst > 0 && d.description.toString().startsWith ("mod:"); }
+    void itemDragEnter (const SourceDetails&) override { dragOver = true; repaint(); }
+    void itemDragExit (const SourceDetails&) override  { dragOver = false; repaint(); }
+    void itemDropped (const SourceDetails& d) override
+    {
+        dragOver = false;
+        if (ModHost::current() != nullptr) ModHost::current()->dropMod (d.description.toString().fromFirstOccurrenceOf ("mod:", false, false).getIntValue(), dst);
+        refreshRings(); repaint();
+    }
+
+    bool refreshRings()
+    {
+        if (dst <= 0 || ModHost::current() == nullptr) return false;
+        rings = ModHost::current()->ringsFor (dst);
+        return ! rings.empty();
+    }
+    bool hasRings() const { return ! rings.empty(); }
+    int modDest() const { return dst; }
+
+    ModSlider slider;
 private:
     juce::String label;
     const synth::Spec* spec;
+    int dst = 0;
     juce::Colour colour;
+    bool dragOver = false;
+    std::vector<ModRing> rings;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> att;
+};
+
+//==============================================================================
+// Draggable modulation source badge ("drag me onto a knob")
+class ModBadge : public juce::Component, public juce::SettableTooltipClient
+{
+public:
+    ModBadge (int source, juce::String txt, juce::Colour c) : src (source), text (std::move (txt)), col (c)
+    {
+        setMouseCursor (juce::MouseCursor::DraggingHandCursor);
+        setTooltip ("Drag onto any knob to modulate it");
+    }
+    void paint (juce::Graphics& g) override
+    {
+        auto r = getLocalBounds().toFloat().reduced (0.5f);
+        g.setColour (col.withAlpha (hover ? 0.22f : 0.12f)); g.fillRoundedRectangle (r, r.getHeight() * 0.5f);
+        g.setColour (col.withAlpha (0.8f)); g.drawRoundedRectangle (r, r.getHeight() * 0.5f, 1.0f);
+        drawLed (g, { r.getX() + 9.0f, r.getCentreY() }, 2.8f, col, 0.45f + 0.55f * level);
+        g.setColour (col.interpolatedWith (juce::Colours::white, 0.35f));
+        g.setFont (font (9.5f));
+        g.drawText (text, r.withTrimmedLeft (16.0f), juce::Justification::centredLeft);
+    }
+    void mouseEnter (const juce::MouseEvent&) override { hover = true; repaint(); }
+    void mouseExit (const juce::MouseEvent&) override  { hover = false; repaint(); }
+    void mouseDrag (const juce::MouseEvent& e) override
+    {
+        if (e.getDistanceFromDragStart() < 4) return;
+        if (auto* dc = juce::DragAndDropContainer::findParentDragContainerFor (this))
+            if (! dc->isDragAndDropActive()) dc->startDragging ("mod:" + juce::String (src), this);
+    }
+    void setLevel (float v) { if (std::abs (v - level) > 0.02f) { level = v; repaint(); } }
+    int source() const { return src; }
+private:
+    int src; juce::String text; juce::Colour col;
+    bool hover = false; float level = 0.0f;
 };
 
 //==============================================================================

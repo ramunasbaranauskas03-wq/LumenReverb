@@ -52,11 +52,12 @@ inline Values generatePatch (int category, juce::Random& r)
             if (chance (r, 0.45f))
             {
                 set ("l1_sync", 1); set ("l1_div", (float) pick (r, { 9, 12, 11, 6, 14 })); set ("l1_shape", (float) pick (r, { 0, 1, 3, 5 }));
-                if (chance (r, 0.5f)) mod (1, 12, rr (r, 0.2f, 0.45f)); else mod (1, 1, rr (r, 0.25f, 0.6f));
-                mod (6, 19, 0.5f);
+                if (chance (r, 0.5f)) mod (1, 20, rr (r, 0.2f, 0.45f)); else mod (1, 1, rr (r, 0.25f, 0.6f));
+                mod (9, 29, 0.5f);
             }
-            if (chance (r, 0.35f)) { set ("e3_a", 0); set ("e3_d", rr (r, 0.05f, 0.15f)); set ("e3_s", 0); mod (4, pick (r, { 1, 11 }), rr (r, 0.1f, 0.4f)); }
-            mod (9, 12, 0.4f);
+            if (chance (r, 0.35f)) { set ("e3_a", 0); set ("e3_d", rr (r, 0.05f, 0.15f)); set ("e3_s", 0); mod (7, pick (r, { 1, 19 }), rr (r, 0.1f, 0.4f)); }
+            mod (12, 20, 0.4f);
+            if (chance (r, 0.2f)) { set ("flt_type", 9); set ("flt_cut", rr (r, 200.0f, 2000.0f)); set ("flt_res", rr (r, 0.3f, 0.6f)); }
             if (chance (r, 0.8f)) { set ("dist_on", 1); set ("dist_mode", (float) pick (r, { 0, 0, 1, 2 })); set ("dist_drive", rr (r, 0.2f, 0.6f)); }
             if (chance (r, 0.5f)) { set ("ott_on", 1); set ("ott_depth", rr (r, 0.2f, 0.5f)); }
             break;
@@ -71,11 +72,13 @@ inline Values generatePatch (int category, juce::Random& r)
                                      set ("b_uni", (float) pick (r, { 1, 3, 5 })); set ("b_det", rr (r, 0.15f, 0.3f)); set ("b_level", rr (r, 0.3f, 0.6f)); }
             set ("flt_type", 2); set ("flt_cut", rr (r, 3000.0f, 9000.0f)); set ("flt_res", rr (r, 0.0f, 0.2f));
             set ("e1_a", rr (r, 0.001f, 0.01f)); set ("e1_d", rr (r, 0.3f, 0.7f)); set ("e1_s", rr (r, 0.7f, 0.95f)); set ("e1_r", rr (r, 0.2f, 0.4f));
-            set ("l1_sync", 0); set ("l1_rate", rr (r, 4.5f, 6.0f)); mod (6, 11, 0.01f);
-            mod (9, 12, -0.35f);
+            set ("l1_sync", 0); set ("l1_rate", rr (r, 4.5f, 6.0f)); mod (9, 19, 0.01f);
+            mod (12, 20, -0.35f);
             if (chance (r, 0.4f)) { set ("dist_on", 1); set ("dist_mode", 0); set ("dist_drive", rr (r, 0.15f, 0.4f)); }
             if (chance (r, 0.6f)) { set ("ott_on", 1); set ("ott_depth", rr (r, 0.25f, 0.55f)); }
             if (chance (r, 0.3f)) { set ("pump_on", 1); set ("pump_depth", rr (r, 0.35f, 0.6f)); }
+            if (chance (r, 0.45f)) { set ("hyp_on", 1); set ("hyp_detune", rr (r, 0.25f, 0.5f)); set ("hyp_dim", rr (r, 0.4f, 0.8f)); set ("hyp_mix", rr (r, 0.3f, 0.5f)); }
+            if (chance (r, 0.35f)) { set ("c_on", 1); set ("c_table", (float) pick (r, { 9, 0, 3 })); set ("c_pos", rr (r, 0.3f, 0.8f)); set ("c_oct", 1); set ("c_level", rr (r, 0.25f, 0.4f)); }
             fxSpace (0.6f, 0.75f, 0.22f);
             break;
         }
@@ -89,7 +92,8 @@ inline Values generatePatch (int category, juce::Random& r)
             set ("flt_env", rr (r, 0.45f, 0.7f)); set ("flt_key", 0.3f);
             set ("e2_a", 0); set ("e2_d", rr (r, 0.1f, 0.4f)); set ("e2_s", 0);
             set ("e1_a", 0.001f); set ("e1_d", rr (r, 0.2f, 0.6f)); set ("e1_s", 0); set ("e1_r", rr (r, 0.2f, 0.4f));
-            mod (9, 12, 0.35f); mod (5, 12, 0.15f);
+            mod (12, 20, 0.35f); mod (8, 20, 0.15f);
+            if (chance (r, 0.25f)) { set ("arp_on", 1); set ("arp_mode", (float) pick (r, { 0, 2, 4 })); set ("arp_rate", 3); set ("arp_oct", (float) pick (r, { 1, 2 })); set ("arp_gate", rr (r, 0.35f, 0.6f)); }
             if (chance (r, 0.4f)) { set ("ott_on", 1); set ("ott_depth", rr (r, 0.3f, 0.5f)); }
             fxSpace (0.75f, 0.85f, 0.28f);
             break;
@@ -103,11 +107,14 @@ inline Values generatePatch (int category, juce::Random& r)
             set ("b_oct", (float) pick (r, { 0, 1, -1 }));
             set ("flt_type", 2); set ("flt_cut", rr (r, 1500.0f, 5000.0f)); set ("flt_res", rr (r, 0.05f, 0.25f));
             set ("e1_a", rr (r, 0.3f, 1.5f)); set ("e1_d", 1.0f); set ("e1_s", rr (r, 0.8f, 1.0f)); set ("e1_r", rr (r, 1.5f, 4.0f));
-            set ("l1_sync", 0); set ("l1_rate", rr (r, 0.05f, 0.3f)); set ("l1_retrig", 0); mod (1, 1, rr (r, 0.15f, 0.35f));
-            set ("l2_sync", 0); set ("l2_rate", rr (r, 0.05f, 0.2f)); set ("l2_retrig", 0); mod (2, 12, rr (r, 0.08f, 0.2f));
-            mod (9, 12, 0.4f);
+            set ("l1_sync", 0); set ("l1_rate", rr (r, 0.05f, 0.3f)); set ("l1_mode", 0); mod (1, 1, rr (r, 0.15f, 0.35f));
+            set ("l2_sync", 0); set ("l2_rate", rr (r, 0.05f, 0.2f)); set ("l2_mode", 0); mod (2, 20, rr (r, 0.08f, 0.2f));
+            mod (12, 20, 0.4f);
             if (chance (r, 0.6f)) { set ("cho_on", 1); set ("cho_mix", rr (r, 0.25f, 0.45f)); }
             if (chance (r, 0.35f)) { set ("pump_on", 1); set ("pump_depth", rr (r, 0.6f, 0.85f)); }
+            if (chance (r, 0.4f)) { set ("pha_on", 1); set ("pha_rate", rr (r, 0.05f, 0.3f)); set ("pha_mix", rr (r, 0.3f, 0.5f)); }
+            if (chance (r, 0.5f)) { set ("c_on", 1); set ("c_table", (float) pick (r, { 9, 7, 6 })); set ("c_pos", rr (r, 0.2f, 0.8f)); set ("c_oct", (float) pick (r, { 1, -1 })); set ("c_uni", 3); set ("c_level", rr (r, 0.25f, 0.4f));
+                                     set ("l3_sync", 0); set ("l3_rate", rr (r, 0.03f, 0.15f)); set ("l3_mode", 0); mod (3, 13, rr (r, 0.2f, 0.4f)); }
             set ("rev_on", 1); set ("rev_mix", rr (r, 0.35f, 0.5f)); set ("rev_decay", rr (r, 4.0f, 8.0f)); set ("rev_size", rr (r, 0.75f, 0.95f));
             break;
         }
@@ -120,7 +127,7 @@ inline Values generatePatch (int category, juce::Random& r)
             set ("flt_type", (float) pick (r, { 1, 2 })); set ("flt_cut", rr (r, 1800.0f, 6000.0f)); set ("flt_env", rr (r, 0.1f, 0.35f));
             set ("e2_d", rr (r, 0.2f, 0.5f)); set ("e2_s", 0);
             set ("e1_a", 0.002f); set ("e1_d", rr (r, 0.3f, 0.8f)); set ("e1_s", rr (r, 0.0f, 0.4f)); set ("e1_r", rr (r, 0.1f, 0.3f));
-            mod (9, 12, 0.35f);
+            mod (12, 20, 0.35f);
             if (chance (r, 0.5f)) { set ("ott_on", 1); set ("ott_depth", rr (r, 0.25f, 0.45f)); }
             if (chance (r, 0.5f)) { set ("pump_on", 1); set ("pump_depth", rr (r, 0.4f, 0.7f)); }
             if (chance (r, 0.4f)) { set ("cho_on", 1); set ("cho_mix", rr (r, 0.2f, 0.35f)); }
@@ -132,9 +139,9 @@ inline Values generatePatch (int category, juce::Random& r)
             set ("voices", 4);
             const int kind = r.nextInt (3);
             set ("a_table", (float) pick (r, { 0, 1, 5, 8 })); set ("a_pos", rr (r, 0.0f, 0.6f)); set ("a_uni", (float) pick (r, { 1, 3, 7 })); set ("a_det", rr (r, 0.1f, 0.4f));
-            if (kind == 0)      { set ("e3_a", 0); set ("e3_d", rr (r, 0.1f, 0.5f)); set ("e3_s", 0); mod (4, 11, rr (r, 0.5f, 1.0f)); set ("e1_d", 0.5f); set ("e1_s", 0); set ("flt_on", 0); }
-            else if (kind == 1) { set ("noise_on", 1); set ("noise_level", rr (r, 0.5f, 0.9f)); set ("flt_type", 3); set ("flt_cut", 250); mod (9, 12, 0.75f); mod (9, 11, 0.5f); set ("e1_s", 1); set ("e1_r", 1.5f); }
-            else                { set ("l1_sync", 1); set ("l1_div", (float) pick (r, { 12, 14, 15 })); set ("l1_shape", 6); mod (1, 11, rr (r, 0.2f, 0.5f)); mod (1, 12, 0.3f); set ("flt_type", 5); set ("flt_cut", 1500); set ("flt_res", 0.5f); }
+            if (kind == 0)      { set ("e3_a", 0); set ("e3_d", rr (r, 0.1f, 0.5f)); set ("e3_s", 0); mod (7, 19, rr (r, 0.5f, 1.0f)); set ("e1_d", 0.5f); set ("e1_s", 0); set ("flt_on", 0); }
+            else if (kind == 1) { set ("noise_on", 1); set ("noise_level", rr (r, 0.5f, 0.9f)); set ("flt_type", 3); set ("flt_cut", 250); mod (12, 20, 0.75f); mod (12, 19, 0.5f); set ("e1_s", 1); set ("e1_r", 1.5f); }
+            else                { set ("l1_sync", 1); set ("l1_div", (float) pick (r, { 12, 14, 15 })); set ("l1_shape", 6); mod (1, 19, rr (r, 0.2f, 0.5f)); mod (1, 20, 0.3f); set ("flt_type", 5); set ("flt_cut", 1500); set ("flt_res", 0.5f); }
             fxSpace (0.8f, 0.9f, 0.35f);
             break;
         }
@@ -157,8 +164,9 @@ inline float mutateValue (const Spec& s, float cur, float norm, float amount, ju
     // never touched: structure, routing, level and performance settings
     if (id == "vol" || id.startsWith ("macro") || id.endsWith ("_src") || id.endsWith ("_dst") || id.endsWith ("_on")
         || id == "voices" || id == "legato" || id == "bend" || id == "velsens" || id == "clip" || id.endsWith ("_sync")
-        || id.endsWith ("_retrig") || id.endsWith ("_oct") || id.endsWith ("_semi") || id == "sub_oct" || id.endsWith ("_div")
-        || id == "dly_ping" || id == "dist_mode")
+        || id.endsWith ("_mode") || id.endsWith ("_oct") || id.endsWith ("_semi") || id == "sub_oct" || id.endsWith ("_div")
+        || id == "dly_ping" || id == "dist_mode" || id == "hq" || id == "chord" || id.startsWith ("arp_") || id == "flt_route"
+        || id.endsWith ("_type") || id == "pump_div")
         return cur;
     switch (s.kind)
     {
