@@ -25,6 +25,7 @@ jobs:
           - { target: LumenSpaceControl, product: "Lumen Space Control" }
           - { target: LumenTransient, product: "Lumen Transient" }
           - { target: LumenClipper, product: "Lumen Clipper" }
+          - { target: LumenVocal, product: "Lumen Vocal" }
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.plugin.target }} (${{ matrix.os }})
 
