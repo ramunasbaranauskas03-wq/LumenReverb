@@ -28,6 +28,7 @@ jobs:
           - { target: LumenVocal, product: "Lumen Vocal" }
           - { target: LumenOTT, product: "Lumen OTT" }
           - { target: LumenMod, product: "Lumen Mod" }
+          - { target: LumenGate, product: "Lumen Gate" }
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.plugin.target }} (${{ matrix.os }})
 
