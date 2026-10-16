@@ -29,6 +29,7 @@ jobs:
           - { target: LumenOTT, product: "Lumen OTT" }
           - { target: LumenMod, product: "Lumen Mod" }
           - { target: LumenGate, product: "Lumen Gate" }
+          - { target: LumenMonoFilter, product: "Lumen MonoFilter" }
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.plugin.target }} (${{ matrix.os }})
 
