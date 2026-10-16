@@ -30,6 +30,7 @@ jobs:
           - { target: LumenMod, product: "Lumen Mod" }
           - { target: LumenGate, product: "Lumen Gate" }
           - { target: LumenMonoFilter, product: "Lumen MonoFilter" }
+          - { target: LumenResonance, product: "Lumen Resonance" }
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.plugin.target }} (${{ matrix.os }})
 
