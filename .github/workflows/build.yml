@@ -27,6 +27,7 @@ jobs:
           - { target: LumenClipper, product: "Lumen Clipper" }
           - { target: LumenVocal, product: "Lumen Vocal" }
           - { target: LumenOTT, product: "Lumen OTT" }
+          - { target: LumenMod, product: "Lumen Mod" }
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.plugin.target }} (${{ matrix.os }})
 
