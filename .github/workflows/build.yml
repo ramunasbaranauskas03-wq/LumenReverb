@@ -33,6 +33,7 @@ jobs:
           - { target: LumenResonance, product: "Lumen Resonance" }
           - { target: LumenGlitch, product: "Lumen Glitch" }
           - { target: LumenLoFi, product: "Lumen LoFi" }
+          - { target: LumenKick, product: "Lumen Kick Designer" }
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.plugin.target }} (${{ matrix.os }})
 
