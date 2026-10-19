@@ -37,6 +37,7 @@ jobs:
           - { target: LumenMeter, product: "Lumen Meter" }
           - { target: LumenChord, product: "Lumen Chord" }
           - { target: LumenRiser, product: "Lumen Riser" }
+          - { target: LumenMelody, product: "Lumen Melody Bass" }
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.plugin.target }} (${{ matrix.os }})
 
