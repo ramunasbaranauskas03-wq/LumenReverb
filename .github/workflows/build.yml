@@ -36,6 +36,7 @@ jobs:
           - { target: LumenKick, product: "Lumen Kick Designer" }
           - { target: LumenMeter, product: "Lumen Meter" }
           - { target: LumenChord, product: "Lumen Chord" }
+          - { target: LumenRiser, product: "Lumen Riser" }
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.plugin.target }} (${{ matrix.os }})
 
