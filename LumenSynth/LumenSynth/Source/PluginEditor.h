@@ -36,7 +36,7 @@ public:
     void dropMod (int src, int dst) override;
     void knobMenu (int dst, juce::Component* target) override;
 
-    static constexpr int kW = 1060, kH = 720;
+    static constexpr int kW = 1060, kH = 634;
 
 private:
     struct Root : public juce::Component
@@ -64,6 +64,22 @@ private:
 
     juce::TextButton prevBtn { "<" }, nextBtn { ">" }, presetArea, browseBtn { "BROWSE" }, saveBtn { "SAVE" };
     std::unique_ptr<lumen::led::Toggle> hqToggle;
+    struct DriftBar : juce::Slider
+    {
+        juce::String label { "DRIFT" }; juce::Colour col { 0xffe6a440 };
+        void paint (juce::Graphics& g) override
+        {
+            auto r = getLocalBounds().toFloat();
+            g.setColour (juce::Colour (0xff111317)); g.fillRoundedRectangle (r, 4.0f);
+            const float v = (float) valueToProportionOfLength (getValue());
+            g.setColour (col.withAlpha (0.30f)); g.fillRoundedRectangle (r.withWidth (r.getWidth() * v), 4.0f);
+            g.setColour (isMouseOverOrDragging() ? col.withAlpha (0.7f) : juce::Colour (0xff2b3037)); g.drawRoundedRectangle (r.reduced (0.5f), 4.0f, 1.0f);
+            g.setColour (juce::Colour (0xffdde2e8)); g.setFont (juce::Font (juce::FontOptions (9.5f, juce::Font::bold)));
+            g.drawText (label + " " + juce::String (juce::roundToInt (v * 100)) + "%", r, juce::Justification::centred);
+        }
+    };
+    DriftBar driftSlider, warmSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> driftAtt, warmAtt;
     juce::ComboBox zoom;
     lumen::led::DotMatrix nameMatrix, logoMatrix;
     lumen::led::LedKeyboard keyboard;

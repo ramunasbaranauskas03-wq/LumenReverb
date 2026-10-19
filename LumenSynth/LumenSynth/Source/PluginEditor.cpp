@@ -207,6 +207,24 @@ public:
                 H = 0.6 * (1.0 + ap / (1.0 - 0.92 * r * ap));
                 break;
             }
+            case fMS20:
+            {
+                const double kk = 2.0 - 1.995 * std::pow (r, 0.5);
+                H = (1.0 + 0.4 * (2.0 - kk)) / (s * s + kk * s + 1.0);
+                break;
+            }
+            case fDiode:
+            {
+                const double kd = 7.4 * r * (0.7 + 0.3 * r) * 0.95;
+                H = (1.0 + 0.3 * kd) / (std::pow (1.0 + s, 3.0) + kd);
+                break;
+            }
+            case fJuno:
+            {
+                const double kj = 3.7 * r * 0.97;
+                H = (1.0 + 0.9 * kj) / (std::pow (1.0 + s, 4.0) + kj);
+                break;
+            }
             default: H = 1.0; break;
         }
         return (float) (20.0 * std::log10 (std::abs (H) + 1e-9));
@@ -435,9 +453,12 @@ public:
             const auto col = cols[o];
             const int x0 = o * 252;
             add<Toggle> (*this, owned, st, pre + "_on", "", col, true)->setBounds (x0 + 6, 3, 20, 20);
-            add<Combo> (*this, owned, st, pre + "_table", col)->setBounds (x0 + 74, 4, 104, 20);
-            add<Combo> (*this, owned, st, pre + "_warpm", col)->setBounds (x0 + 182, 4, 62, 20);
-            wt[o] = add<WavetableView> (*this, owned, p, o, col); wt[o]->setBounds (x0 + 8, 28, 228, 82);
+            add<Combo> (*this, owned, st, pre + "_table", col)->setBounds (x0 + 92, 4, 144, 20);
+            auto* wm = add<Combo> (*this, owned, st, pre + "_warpm", col); wm->setBounds (x0 + 8, 28, 112, 20);
+            wm->setTooltip ("Warp mode");
+            auto* um = add<Combo> (*this, owned, st, pre + "_umode", col); um->setBounds (x0 + 124, 28, 112, 20);
+            um->setTooltip ("Unison mode: Classic / Super (JP-8000 supersaw) / stacks: unison voices spread over octaves, fifths or a major / minor chord");
+            wt[o] = add<WavetableView> (*this, owned, p, o, col); wt[o]->setBounds (x0 + 8, 54, 228, 112);
             const char* ids[3][4] = { { "_pos", "_warp", "_level", "_pan" }, { "_uni", "_det", "_blend", "_width" }, { "_oct", "_semi", "_fine", "_rand" } };
             const char* lbl[3][4] = { { "POSITION", "WARP", "LEVEL", "PAN" }, { "UNISON", "DETUNE", "BLEND", "WIDTH" }, { "OCTAVE", "SEMI", "FINE", "PHASE" } };
             for (int row = 0; row < 3; ++row)
@@ -445,7 +466,7 @@ public:
                 {
                     const juce::String id = pre + ids[row][c];
                     const bool bip = id.endsWith ("_pan") || id.endsWith ("_oct") || id.endsWith ("_semi") || id.endsWith ("_fine");
-                    add<Knob> (*this, owned, st, id, lbl[row][c], col, bip)->setBounds (x0 + 8 + c * 57, 114 + row * 99, 57, 94);
+                    add<Knob> (*this, owned, st, id, lbl[row][c], col, bip)->setBounds (x0 + 8 + c * 57, 172 + row * 80, 57, 76);
                 }
         }
     }
@@ -1059,17 +1080,22 @@ private:
 class MacroPanel : public Page
 {
 public:
-    MacroPanel (APVTS& s, std::vector<ModBadge*>& badges)
+    MacroPanel (LumenSynthProcessor& p, std::vector<ModBadge*>& badges) : proc (p)
     {
+        auto& s = p.apvts;
         const juce::Colour cols[] = { C::cyan, C::magenta, C::amber, C::green };
         for (int m = 0; m < 4; ++m)
         {
-            add<Knob> (*this, owned, s, "macro" + juce::String (m + 1), "MACRO " + juce::String (m + 1), cols[m])->setBounds (6 + m * 64, 22, 64, 78);
+            knobs[m] = add<Knob> (*this, owned, s, "macro" + juce::String (m + 1), "MACRO " + juce::String (m + 1), cols[m]);
+            knobs[m]->setBounds (6 + m * 64, 22, 64, 78);
             auto* b = add<ModBadge> (*this, owned, sM1 + m, "M" + juce::String (m + 1), cols[m]); b->setBounds (14 + m * 64, 100, 48, 14); badges.push_back (b);
         }
     }
     void paint (juce::Graphics& g) override { panel (g, getLocalBounds().toFloat(), "MACROS", C::cyan); }
+    void tick() override { for (int m = 0; m < 4; ++m) knobs[m]->setLabel (proc.macroNames[m].toUpperCase().substring (0, 9)); }
 private:
+    LumenSynthProcessor& proc;
+    Knob* knobs[4] {};
     std::vector<std::unique_ptr<juce::Component>> owned;
 };
 
@@ -1079,12 +1105,10 @@ public:
     ScopePanel (LumenSynthProcessor& p) : proc (p) {}
     void paint (juce::Graphics& g) override
     {
-        panel (g, getLocalBounds().toFloat(), "SCOPE", C::green);
+        panel (g, getLocalBounds().toFloat(), "SCOPE", C::cyan);
         auto a = getLocalBounds().toFloat().reduced (10.0f, 6.0f).withTrimmedTop (20.0f);
         lcd (g, a, C::green);
         a = a.reduced (4.0f, 3.0f);
-        const int cols = 62, rows = 11;
-        const float px = a.getWidth() / cols, py = a.getHeight() / rows;
         const int N = LumenSynthProcessor::kScope;
         const int wp = proc.scopePos.load (std::memory_order_acquire);
         float buf[LumenSynthProcessor::kScope];
@@ -1093,19 +1117,16 @@ public:
         for (int i = N - 700; i > 300; --i) if (buf[i - 1] < 0.0f && buf[i] >= 0.0f) { start = i; break; }
         float pk = 0.05f; for (int i = start; i < start + 600 && i < N; ++i) pk = juce::jmax (pk, std::abs (buf[i]));
         gainSm += (1.0f / pk - gainSm) * 0.2f;
-        int prevRow = -1;
-        for (int c = 0; c < cols; ++c)
+        g.setColour (C::border); g.drawHorizontalLine ((int) a.getCentreY(), a.getX(), a.getRight());
+        juce::Path wave;
+        for (int k = 0; k <= 200; ++k)
         {
-            const int idx = juce::jmin (N - 1, start + c * 600 / cols);
-            const float v = juce::jlimit (-1.0f, 1.0f, buf[idx] * gainSm * 0.92f);
-            const int row = juce::jlimit (0, rows - 1, (int) std::round ((1.0f - (v + 1.0f) * 0.5f) * (rows - 1)));
-            for (int r = 0; r < rows; ++r)
-            {
-                const bool between = prevRow >= 0 && r > juce::jmin (row, prevRow) && r < juce::jmax (row, prevRow);
-                drawLed (g, { a.getX() + (c + 0.5f) * px, a.getY() + (r + 0.5f) * py }, juce::jmin (px, py) * 0.32f, C::green, r == row ? 1.0f : between ? 0.55f : 0.0f);
-            }
-            prevRow = row;
+            const int idx = juce::jmin (N - 1, start + k * 3);
+            const float v = juce::jlimit (-1.0f, 1.0f, buf[idx] * gainSm * 0.9f);
+            const float x = a.getX() + a.getWidth() * (float) k / 200.0f, y = a.getCentreY() - v * a.getHeight() * 0.48f;
+            if (k == 0) wave.startNewSubPath (x, y); else wave.lineTo (x, y);
         }
+        glowPath (g, wave, C::cyan, 1.4f);
     }
     void tick() override { repaint(); }
 private:
@@ -1243,39 +1264,23 @@ private:
 //==============================================================================
 void LedKeyboard::drawWhiteNote (int note, juce::Graphics& g, juce::Rectangle<float> area, bool down, bool over, juce::Colour, juce::Colour)
 {
-    auto r = area.reduced (0.6f, 0.0f);
-    juce::ColourGradient gr (juce::Colour (0xff2a3340), r.getX(), r.getY(), juce::Colour (0xff3e4a5b), r.getX(), r.getBottom(), false);
-    g.setGradientFill (gr); g.fillRoundedRectangle (r.withTrimmedTop (-4.0f), 3.0f);
-    g.setColour (juce::Colours::white.withAlpha (0.07f)); g.fillRect (r.withHeight (2.0f).withY (r.getBottom() - 4.0f));
-    if (over) { g.setColour (juce::Colours::white.withAlpha (0.05f)); g.fillRect (r); }
-    if (down)
-    {
-        juce::ColourGradient lit (C::cyan.withAlpha (0.75f), r.getX(), r.getY(), C::cyan.withAlpha (0.15f), r.getX(), r.getBottom(), false);
-        g.setGradientFill (lit); g.fillRoundedRectangle (r.withTrimmedTop (-4.0f), 3.0f);
-    }
-    drawLed (g, { r.getCentreX(), r.getBottom() - 9.0f }, 2.3f, C::cyan, down ? 1.0f : 0.0f);
-    g.setColour (juce::Colours::black); g.drawVerticalLine ((int) area.getRight(), area.getY(), area.getBottom());
+    auto r = area.reduced (0.5f, 0.0f);
+    g.setColour (down ? C::cyan.interpolatedWith (juce::Colours::white, 0.2f) : over ? juce::Colour (0xffb4bac3) : juce::Colour (0xffa3a9b2));
+    g.fillRoundedRectangle (r.withTrimmedTop (-3.0f), 2.5f);
+    g.setColour (juce::Colours::black.withAlpha (0.35f)); g.drawVerticalLine ((int) area.getRight(), area.getY(), area.getBottom());
     if (note % 12 == 0)
     {
-        g.setColour (down ? juce::Colours::white : juce::Colour (0xff0d1117));
-        g.setFont (font (8.5f));
-        g.drawText ("C" + juce::String (note / 12 - 2), r.withTrimmedBottom (14.0f).removeFromBottom (12.0f), juce::Justification::centred);
+        g.setColour (juce::Colour (0xff3a3f47));
+        g.setFont (font (8.5f, false));
+        g.drawText ("C" + juce::String (note / 12 - 2), r.removeFromBottom (14.0f), juce::Justification::centred);
     }
 }
 
 void LedKeyboard::drawBlackNote (int, juce::Graphics& g, juce::Rectangle<float> area, bool down, bool over, juce::Colour)
 {
     auto r = area.reduced (0.5f, 0.0f);
-    g.setColour (juce::Colours::black.withAlpha (0.5f)); g.fillRoundedRectangle (r.translated (1.5f, 2.0f).withTrimmedTop (-4.0f), 2.5f);
-    juce::ColourGradient gr (juce::Colour (0xff030405), r.getX(), r.getY(), juce::Colour (0xff10151c), r.getX(), r.getBottom(), false);
-    g.setGradientFill (gr); g.fillRoundedRectangle (r.withTrimmedTop (-4.0f), 2.5f);
-    g.setColour (juce::Colours::white.withAlpha (over ? 0.16f : 0.09f)); g.drawRoundedRectangle (r.reduced (1.0f).withTrimmedTop (-4.0f), 2.0f, 1.0f);
-    if (down)
-    {
-        juce::ColourGradient lit (C::magenta.withAlpha (0.85f), r.getX(), r.getY(), C::magenta.withAlpha (0.2f), r.getX(), r.getBottom(), false);
-        g.setGradientFill (lit); g.fillRoundedRectangle (r.withTrimmedTop (-4.0f), 2.5f);
-    }
-    drawLed (g, { r.getCentreX(), r.getBottom() - 7.0f }, 1.8f, C::magenta, down ? 1.0f : 0.0f);
+    g.setColour (down ? C::cyan : over ? juce::Colour (0xff3a4048) : juce::Colour (0xff22262c));
+    g.fillRoundedRectangle (r.withTrimmedTop (-3.0f), 2.0f);
 }
 
 //==============================================================================
@@ -1296,7 +1301,7 @@ LumenSynthEditor::LumenSynthEditor (LumenSynthProcessor& p)
     pages[6] = std::make_unique<ArpPage> (proc);
     for (auto& pg : pages) root.addChildComponent (*pg);
     smart  = std::make_unique<SmartPanel> (proc);
-    macros = std::make_unique<MacroPanel> (proc.apvts, badges);
+    macros = std::make_unique<MacroPanel> (proc, badges);
     scope  = std::make_unique<ScopePanel> (proc);
     browser = std::make_unique<Browser> (proc);
     root.addAndMakeVisible (*smart); root.addAndMakeVisible (*macros); root.addAndMakeVisible (*scope);
@@ -1307,8 +1312,10 @@ LumenSynthEditor::LumenSynthEditor (LumenSynthProcessor& p)
     for (int i = 0; i < kPages; ++i)
     {
         tabs[i].setButtonText (names[i]);
-        tabs[i].setColour (juce::TextButton::buttonColourId, cols[i]);
+        tabs[i].setColour (juce::TextButton::buttonColourId, C::cyan);
+        tabs[i].getProperties().set ("tab", true);
         tabs[i].onClick = [this, i] { showPage (i); };
+        (void) cols;
         root.addAndMakeVisible (tabs[i]);
     }
     for (auto* b : { &prevBtn, &nextBtn }) { b->setColour (juce::TextButton::buttonColourId, C::cyan); root.addAndMakeVisible (*b); }
@@ -1325,9 +1332,22 @@ LumenSynthEditor::LumenSynthEditor (LumenSynthProcessor& p)
     root.addAndMakeVisible (browseBtn); root.addAndMakeVisible (saveBtn);
 
     hqToggle = std::make_unique<Toggle> (proc.apvts, "hq", "HQ", C::amber);
-    hqToggle->setTooltip ("HQ: oscillators and filters run at 2x sample rate (cleaner high notes / warps, ~2x CPU)");
+    hqToggle->setTooltip ("HQ (on by default): voices run at 2x with oscillators band-limited for the output rate, so filter drive and resonance stay clean; distortion runs at 8x. Turn off only to save CPU");
     root.addAndMakeVisible (*hqToggle);
-    zoom.addItemList ({ "75%", "100%", "125%", "150%" }, 1);
+    driftSlider.setSliderStyle (juce::Slider::LinearBar);
+    driftSlider.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
+    driftSlider.setColour (juce::Slider::trackColourId, C::amber.withAlpha (0.55f));
+    driftSlider.setTooltip ("ANALOG DRIFT: every unison voice wanders slightly in pitch and filter like a real analog synth - kills the static digital sound");
+    driftAtt = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.apvts, "drift", driftSlider);
+    root.addAndMakeVisible (driftSlider);
+    warmSlider.label = "WARMTH"; warmSlider.col = C::orange;
+    warmSlider.setSliderStyle (juce::Slider::LinearBar);
+    warmSlider.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
+    warmSlider.setTooltip ("ANALOG WARMTH: every voice goes through a soft analog-style saturation stage with small part tolerances - thicker, rounder, less 'digital'");
+    warmAtt = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.apvts, "warmth", warmSlider);
+    root.addAndMakeVisible (warmSlider);
+    zoom.addItemList ({ "75", "100", "125", "150" }, 1);
+    zoom.setTooltip ("Window size (%)");
     zoom.setColour (juce::ComboBox::textColourId, C::cyan);
     zoom.setSelectedId (2, juce::dontSendNotification);
     zoom.onChange = [this] { const float s[] = { 0.75f, 1.0f, 1.25f, 1.5f }; const float k = s[juce::jlimit (0, 3, zoom.getSelectedId() - 1)]; setSize ((int) (kW * k), (int) (kH * k)); };
@@ -1367,7 +1387,7 @@ void LumenSynthEditor::collectKnobs (juce::Component& c)
 void LumenSynthEditor::showPage (int idx)
 {
     currentPage = idx;
-    for (int i = 0; i < kPages; ++i) pages[i]->setVisible (i == idx);
+    for (int i = 0; i < kPages; ++i) { pages[i]->setVisible (i == idx); tabs[i].setToggleState (i == idx, juce::dontSendNotification); }
     browser->setVisible (false);
     root.repaint (0, 64, kW, 40);
 }
@@ -1413,14 +1433,16 @@ void LumenSynthEditor::resized()
     scope->setBounds (776, 434, 268, 82);
     browser->setBounds (16, 104, 1028, 412);
     for (int i = 0; i < kPages; ++i) tabs[i].setBounds (16 + i * 106, 70, 100, 28);
-    hqToggle->setBounds (776, 72, 74, 24);
-    zoom.setBounds (968, 72, 76, 24);
+    hqToggle->setBounds (776, 72, 56, 24);
+    driftSlider.setBounds (838, 74, 72, 20);
+    warmSlider.setBounds (914, 74, 82, 20);
+    zoom.setBounds (1000, 72, 44, 24);
     prevBtn.setBounds (296, 18, 30, 30);
     nextBtn.setBounds (654, 18, 30, 30);
     presetArea.setBounds (330, 10, 320, 46);
     browseBtn.setBounds (692, 9, 62, 22);
     saveBtn.setBounds (692, 35, 62, 22);
-    keyboard.setBounds (16, 528, 1028, 180);
+    keyboard.setBounds (16, 526, 1028, 96);
     keyboard.setKeyWidth (1028.0f / 50.0f);
     keyboard.setBlackNoteLengthProportion (0.6f);
 }
@@ -1428,58 +1450,42 @@ void LumenSynthEditor::resized()
 void LumenSynthEditor::paintContent (juce::Graphics& g)
 {
     g.fillAll (C::bg);
-    dotGrid (g, juce::Rectangle<float> (0, 0, (float) kW, (float) kH), 9.0f, juce::Colours::white, 0.035f);
-    juce::ColourGradient vig (juce::Colours::transparentBlack, kW * 0.5f, kH * 0.4f, juce::Colours::black.withAlpha (0.55f), 0.0f, 0.0f, true);
-    g.setGradientFill (vig); g.fillRect (0, 0, kW, kH);
-
-    juce::ColourGradient hg (juce::Colour (0xff0c1119), 0, 0, juce::Colour (0xff06080c), 0, 64, false);
-    g.setGradientFill (hg); g.fillRect (0, 0, kW, 64);
-    juce::ColourGradient line (C::cyan.withAlpha (0.0f), 0, 64, C::cyan.withAlpha (0.0f), (float) kW, 64, false);
-    line.addColour (0.3, C::cyan.withAlpha (0.7f)); line.addColour (0.7, C::magenta.withAlpha (0.7f));
-    g.setGradientFill (line); g.fillRect (0, 63, kW, 2);
-    g.setGradientFill (line); g.setOpacity (0.25f); g.fillRect (0, 60, kW, 8); g.setOpacity (1.0f);
-
+    // header bar
+    g.setColour (juce::Colour (0xff111316)); g.fillRect (0, 0, kW, 64);
+    g.setColour (C::border); g.fillRect (0, 64, kW, 1);
     {
-        juce::GlyphArrangement ga; ga.addLineOfText (font (32.0f), "LUMEN", 20.0f, 40.0f);
-        juce::Path lp; ga.createPath (lp);
-        g.setColour (C::cyan.withAlpha (0.12f)); g.strokePath (lp, juce::PathStrokeType (6.0f));
-        g.setColour (C::cyan.withAlpha (0.25f)); g.strokePath (lp, juce::PathStrokeType (2.5f));
-        juce::ColourGradient lg (C::cyan, 20, 0, C::magenta, 140, 0, false);
-        g.setGradientFill (lg); g.fillPath (lp);
-        logoMatrix.draw (g, { 150.0f, 14.0f, 130.0f, 28.0f }, "SYNTH 2", C::magenta, 2.4f, juce::Justification::centredLeft, false, 10.5f);
+        g.setColour (C::text); g.setFont (juce::Font (juce::FontOptions (25.0f, juce::Font::bold)).withExtraKerningFactor (0.12f));
+        g.drawText ("LUMEN", 22, 16, 120, 32, juce::Justification::centredLeft);
+        g.setColour (C::cyan); g.setFont (juce::Font (juce::FontOptions (25.0f, juce::Font::plain)).withExtraKerningFactor (0.12f));
+        g.drawText ("SYNTH", 132, 16, 120, 32, juce::Justification::centredLeft);
     }
     {
-        auto d = juce::Rectangle<float> (290.0f, 8.0f, 400.0f, 50.0f);
+        auto d = juce::Rectangle<float> (290.0f, 10.0f, 400.0f, 46.0f);
         lcd (g, d, C::cyan);
-        dotGrid (g, d.reduced (4.0f), 3.0f, C::cyan, 0.05f);
-        nameMatrix.draw (g, { 332.0f, 22.0f, 316.0f, 30.0f }, proc.getPresetName(), C::cyan, 2.2f, juce::Justification::centred, true, 10.6f);
-        g.setFont (font (9.5f)); g.setColour (C::magenta.withAlpha (0.9f));
-        g.drawText (proc.getPresetCategory().toUpperCase(), 334, 10, 150, 12, juce::Justification::centredLeft);
+        g.setColour (C::text); g.setFont (font (15.0f));
+        g.drawFittedText (proc.getPresetName(), juce::Rectangle<int> (334, 24, 312, 26), juce::Justification::centred, 1);
+        g.setFont (font (9.0f)); g.setColour (C::cyan);
+        g.drawText (proc.getPresetCategory().toUpperCase(), 334, 12, 150, 12, juce::Justification::centredLeft);
         g.setColour (proc.isUserPreset() ? C::green : C::dim);
         g.drawText (proc.isUserPreset() ? juce::String ("USER") : juce::String (proc.getCurrentProgram() + 1) + " / " + juce::String (proc.getNumPrograms()),
-                    496, 10, 150, 12, juce::Justification::centredRight);
-    }
-    g.setFont (font (9.5f)); g.setColour (C::text.withAlpha (0.6f));
-    g.drawText ("VOICES  " + juce::String (proc.activeVoices.load()), 770, 10, 130, 12, juce::Justification::centredLeft);
-    for (int i = 0; i < 16; ++i)
-        drawLed (g, { 776.0f + (i % 8) * 15.0f, 32.0f + (i / 8) * 14.0f }, 3.4f, i < 8 ? C::cyan : C::magenta, voiceLv[i]);
-    g.setColour (C::text.withAlpha (0.6f));
-    g.drawText ("OUTPUT", 912, 10, 132, 12, juce::Justification::centredLeft);
-    ledMeter (g, { 912.0f, 28.0f, 132.0f, 9.0f }, meterL, holdL, false, 22);
-    ledMeter (g, { 912.0f, 42.0f, 132.0f, 9.0f }, meterR, holdR, false, 22);
-
-    const juce::Colour cols[] = { C::cyan, C::amber, C::green, C::blue, C::green, C::magenta, C::cyan };
-    for (int i = 0; i < kPages; ++i)
-    {
-        drawLed (g, { 16.0f + i * 106.0f + 11.0f, 84.0f }, 2.8f, cols[i], i == currentPage ? 1.0f : 0.0f);
-        if (i == currentPage)
-        {
-            g.setColour (cols[i].withAlpha (0.8f)); g.fillRect (16.0f + i * 106.0f + 8.0f, 99.0f, 84.0f, 2.0f);
-            g.setColour (cols[i].withAlpha (0.2f)); g.fillRect (16.0f + i * 106.0f + 4.0f, 97.0f, 92.0f, 6.0f);
-        }
+                    496, 12, 150, 12, juce::Justification::centredRight);
     }
     g.setFont (font (9.0f)); g.setColour (C::dim);
-    g.drawText ("ZOOM", 930, 72, 36, 24, juce::Justification::centredRight);
+    g.drawText ("VOICES  " + juce::String (proc.activeVoices.load()), 770, 10, 130, 12, juce::Justification::centredLeft);
+    for (int i = 0; i < 16; ++i)
+    {
+        const float lv = voiceLv[i];
+        auto cell = juce::Rectangle<float> (772.0f + (i % 8) * 15.0f, 28.0f + (i / 8) * 13.0f, 11.0f, 8.0f);
+        g.setColour (lv > 0.02f ? C::cyan.withAlpha (0.35f + 0.65f * lv) : C::track); g.fillRoundedRectangle (cell, 1.5f);
+    }
+    g.setColour (C::dim);
+    g.drawText ("OUTPUT", 912, 10, 132, 12, juce::Justification::centredLeft);
+    ledMeter (g, { 912.0f, 28.0f, 132.0f, 7.0f }, meterL, holdL, false, 22);
+    ledMeter (g, { 912.0f, 40.0f, 132.0f, 7.0f }, meterR, holdR, false, 22);
+
+    // page tabs: one accent, underline on the active page
+    for (int i = 0; i < kPages; ++i)
+        if (i == currentPage) { g.setColour (C::cyan); g.fillRect (16.0f + i * 106.0f + 10.0f, 98.0f, 80.0f, 2.0f); }
 }
 
 //==============================================================================
@@ -1543,7 +1549,7 @@ void LumenSynthEditor::timerCallback()
     root.repaint (766, 6, 282, 54);
     if (proc.presetVersion.load() != lastPresetVersion) { lastPresetVersion = proc.presetVersion.load(); root.repaint (290, 8, 400, 50); ringCounter = 0; }
     pages[currentPage]->tick();
-    smart->tick(); scope->tick();
+    smart->tick(); scope->tick(); macros->tick();
     for (auto* b : badges) b->setLevel (isBipolarSrc (b->source()) ? 0.5f + 0.5f * proc.modSourceValue (b->source()) : proc.modSourceValue (b->source()));
 
     // mod rings: refresh the assignment list a few times per second, animate the live dots every frame

@@ -7,10 +7,11 @@ namespace lumen
 static constexpr double kTwoPi = 6.283185307179586;
 
 static const char* const kNames[] = { "Basic Shapes", "Saw Stack", "PWM", "Vox Formant", "Hard Sync",
-                                      "FM Growl", "Phase Res", "Organ", "Fold", "Spectral", "Dirty Saw", "Metal FM", nullptr };
+                                      "FM Growl", "Phase Res", "Organ", "Fold", "Spectral", "Dirty Saw", "Metal FM",
+                                      "Analog Saw", "Acid", "Analog Pulse", "Neuro Grind", "DX Bells", "Choir", "Digital Crush", "Sub Harmonics", "Screech Sync", "Square Stack", nullptr };
 
 const char* const* WavetableBank::names() { return kNames; }
-int WavetableBank::numTables() { return 12; }
+int WavetableBank::numTables() { return 22; }
 
 const WavetableBank& WavetableBank::get()
 {
@@ -43,6 +44,46 @@ static double genTime (int table, double t, double p)
         case 8:  { const double g = 1.0 + 7.0 * t; return std::sin (g * std::sin (kTwoPi * p) * 1.5707963); }
         case 10: { const double g = 1.0 + 12.0 * t; return std::tanh (g * (saw (p) + 0.3 * t)) - std::tanh (g * 0.3 * t); }
         case 11: return std::sin (kTwoPi * p + (1.0 + 7.0 * t) * std::sin (kTwoPi * 3.0 * p) + 3.0 * t * std::sin (kTwoPi * 5.0 * p));
+        case 12: // Analog Saw: capacitor-charge ramp (curvature grows), slight reset softness
+        {
+            const double ph = p - std::floor (p), a = 0.35 + 3.2 * t;
+            return 2.0 * (1.0 - std::exp (-a * ph)) / (1.0 - std::exp (-a)) - 1.0;
+        }
+        case 13: // Acid: curved saw -> drooping square (TB-style)
+        {
+            const double ph = p - std::floor (p);
+            const double sw = 2.0 * (1.0 - std::exp (-1.2 * ph)) / (1.0 - std::exp (-1.2)) - 1.0;
+            const double sq = (ph < 0.5 ? 1.0 : -1.0) * (1.0 - 0.45 * (ph < 0.5 ? ph : ph - 0.5) * 2.0);
+            return sw + (sq - sw) * t;
+        }
+        case 14: // Analog Pulse: 50% -> 6% with capacitor droop
+        {
+            const double ph = p - std::floor (p), w = 0.5 - 0.44 * t;
+            return ph < w ? 1.0 - 0.35 * ph / w : -1.0 + 0.35 * (ph - w) / (1.0 - w);
+        }
+        case 15: // Neuro Grind: FM into a wavefolder
+        {
+            const double x = std::sin (kTwoPi * p + (1.5 + 9.0 * t) * std::sin (kTwoPi * 2.0 * p) + 1.5 * t * std::sin (kTwoPi * 3.0 * p));
+            return std::sin ((1.0 + 3.5 * t) * 1.5707963 * x);
+        }
+        case 16: // DX Bells: 1:7 FM + 1:2 shimmer
+            return std::sin (kTwoPi * p + (0.4 + 4.5 * t) * std::sin (kTwoPi * 7.0 * p)) * 0.75 + 0.35 * std::sin (kTwoPi * 2.0 * p + 2.0 * t * std::sin (kTwoPi * 3.0 * p));
+        case 18: // Digital Crush: saw quantised from 64 to 3 steps
+        {
+            const double L = std::round (std::exp2 (6.0 - 4.5 * t));
+            return std::floor (saw (p) * L + 0.5) / L;
+        }
+        case 20: // Screech Sync: synced square with a falling window
+        {
+            const double ph = p - std::floor (p), r = 1.0 + 11.0 * t;
+            const double q = r * ph - std::floor (r * ph);
+            return (q < 0.5 ? 1.0 : -1.0) * (1.0 - 0.8 * ph);
+        }
+        case 21: // Square Stack: square + octave square -> + saw
+        {
+            auto sq = [] (double x) { x -= std::floor (x); return x < 0.5 ? 1.0 : -1.0; };
+            return sq (p) + 0.5 * t * sq (2.0 * p) + 0.35 * t * saw (p * 3.0);
+        }
         default: return 0.0;
     }
 }
@@ -82,10 +123,29 @@ static double genHarm (int table, double t, int k)
         const double peak = 2.5 * std::exp (-0.5 * std::pow (((double) k - edge) / (0.08 * edge + 1.0), 2.0));
         return (roll + peak) / (double) k;
     }
+    if (table == 17)  // Choir: wide formants for 'ah - eh - ee - oh - oo', breathy top
+    {
+        static const double F[5][3] = { { 700, 1220, 2600 }, { 530, 1840, 2480 }, { 300, 2200, 2950 }, { 500, 900, 2400 }, { 330, 870, 2240 } };
+        const double v = t * 4.0; const int a = std::min (3, (int) v); const double fr = v - a;
+        const double f = 130.0 * k; double amp = 0.0;
+        for (int i = 0; i < 3; ++i)
+        {
+            const double fc = F[a][i] + (F[a + 1][i] - F[a][i]) * fr, bw = 130.0 + 90.0 * i;
+            amp += std::exp (-0.5 * std::pow ((f - fc) / bw, 2.0)) * (i == 0 ? 1.0 : i == 1 ? 0.7 : 0.4);
+        }
+        return (amp + 0.05 / (1.0 + k * 0.05)) / std::pow ((double) k, 0.7);
+    }
+    if (table == 19)  // Sub Harmonics: sine -> sine + 2nd..5th (warm bass body)
+    {
+        if (k == 1) return 1.0;
+        if (k > 6) return 0.0;
+        const double on = std::clamp (t * 5.0 - (k - 2), 0.0, 1.0);
+        return on * 0.55 / (k - 0.5);
+    }
     return 0.0;
 }
 
-static bool isAdditive (int t) { return t == 3 || t == 7 || t == 9; }
+static bool isAdditive (int t) { return t == 3 || t == 7 || t == 9 || t == 17 || t == 19; }
 
 //==============================================================================
 // Band-limit a set of full-band spectra into mip levels.

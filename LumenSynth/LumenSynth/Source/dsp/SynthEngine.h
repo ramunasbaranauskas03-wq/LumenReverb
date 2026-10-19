@@ -23,7 +23,8 @@ enum Dst { dOff = 0, dOscBase = 1,      // + 6*osc + { pos, pitch, level, det, w
            dFxDelayMix, dFxDelayFb, dFxReverbMix, dFxReverbSize, dFxPumpDepth, kNumDst };
 constexpr int kNumFxDst = kNumDst - dFxDistDrive;
 enum Warp { wOff, wSync, wBend, wSqueeze, wFM, wMirror, wAsym, wQuantize, wRemap };
-enum FType { fLadder, fLP12, fLP24, fHP12, fHP24, fBP, fNotch, fCombP, fCombN, fFormant, fPhaser };
+enum FType { fLadder, fLP12, fLP24, fHP12, fHP24, fBP, fNotch, fCombP, fCombN, fFormant, fPhaser, fMS20, fDiode, fJuno };
+enum UMode { uClassic, uSuper, uOct, uOct5, uFifth, uMajor, uMinor };
 enum LShape { lSine, lTri, lSawUp, lSawDown, lSquare, lPump, lSH, lSmooth, lCustom };
 enum LMode { lmFree, lmRetrig, lmEnv };
 
@@ -31,7 +32,7 @@ struct OscP
 {
     bool on = true; const Table* tbl = nullptr; float pos = 0; int warpMode = 0; float warp = 0;
     int oct = 0, semi = 0; float fine = 0, level = 0.75f, pan = 0;
-    int uni = 1; float det = 0.25f, blend = 0.75f, width = 0.8f, rand = 1;
+    int uni = 1; float det = 0.25f, blend = 0.75f, width = 0.8f, rand = 1; int umode = 0;
 };
 struct FiltP { bool on = false; int type = 0; float cutoff = 20000, res = 0.1f, drive = 0, env = 0, key = 0; };
 struct ModSlot { int src = 0, dst = 0; float amt = 0; };
@@ -50,6 +51,8 @@ struct Patch
     ModSlot mod[kSlots];
     float macro[4] {};
     int voices = 8; bool legato = false; float glide = 0; int bend = 2; float velSens = 0.5f;
+    float drift = 0;
+    float warmth = 0.3f;     // analog voice stage: soft asymmetric saturation + per-voice tolerances
 };
 
 //==============================================================================
@@ -66,6 +69,17 @@ inline float fastTanh (float x) noexcept
     x = std::clamp (x, -3.0f, 3.0f);       // the Pade approximant peaks at exactly 1.0 at |x| = 3
     const float x2 = x * x;
     return x * (27.0f + x2) / (27.0f + 9.0f * x2);
+}
+
+// JP-8000 super saw detune curve (Szabo 2010), x = detune knob 0..1 -> relative spread
+inline float jpDetune (float x) noexcept
+{
+    const double v = std::clamp ((double) x, 0.0, 1.0);
+    static const double c[12] { 0.0030115596, 0.6717417634, -24.1878824391, 404.2703938388, -3425.0836591318, 17019.9518580080,
+                                -53046.9642751875, 106649.6679158292, -138150.6761080548, 111363.4808729368, -50818.8652045924, 10028.7312891634 };
+    double y = 0.0, p = 1.0;
+    for (double k : c) { y += k * p; p *= v; }
+    return (float) std::max (0.0, y);
 }
 
 inline float polyBlep (float t, float dt) noexcept
@@ -182,6 +196,9 @@ struct VFilter
         g = std::tan (kPiS * fc / fs);
         G = g / (1.0f + g); beta = 1.0f / (1.0f + g);
         k = 3.95f * res * (0.75f + 0.25f * res);
+        if (t == fDiode) k = 7.4f * res * (0.7f + 0.3f * res);
+        if (t == fJuno)  k = 3.7f * res;
+        if (t == fMS20)  { ks = 2.0f - 1.995f * std::pow (res, 0.5f); a1 = 1.0f / (1.0f + g * (g + ks)); a2 = g * a1; a3 = g * a2; return; }
         ks = 2.0f - 1.96f * std::pow (res, 0.7f);
         a1 = 1.0f / (1.0f + g * (g + ks)); a2 = g * a1; a3 = g * a2;
     }
@@ -209,6 +226,37 @@ struct VFilter
                 float y = fastTanh ((x - k * S) / (1.0f + k * G4));
                 for (int i = 0; i < 4; ++i) { const float v = (y - st[i]) * G; y = v + st[i]; st[i] = y + v; }
                 return y * (1.0f + 0.55f * k);
+            }
+            case fDiode:
+            {
+                // 3-pole (18 dB) diode-style ladder: squelchy acid resonance, thinner bass when it screams
+                float* st = s[ch];
+                const float S = beta * (G * G * st[0] + G * st[1] + st[2]);
+                const float G3 = G * G * G;
+                float y = fastTanh ((x - k * fastTanh (S)) / (1.0f + k * G3));
+                for (int i = 0; i < 3; ++i) { const float v = (y - st[i]) * G; y = v + st[i]; st[i] = y + v; if (i == 0) y = fastTanh (y * 1.2f) / 1.2f; }
+                return y * (1.0f + 0.3f * k);
+            }
+            case fJuno:
+            {
+                // OTA 4-pole: soft per-stage saturation, resonance keeps the bass (no thinning)
+                float* st = s[ch];
+                const float S = beta * (G * G * G * st[0] + G * G * st[1] + G * st[2] + st[3]);
+                const float G4 = G * G * G * G;
+                float y = (x - k * S) / (1.0f + k * G4);
+                for (int i = 0; i < 4; ++i) { const float v = (fastTanh (y * 0.8f) * 1.25f - st[i]) * G; y = v + st[i]; st[i] = y + v; }
+                return y * (1.0f + 0.9f * k);
+            }
+            case fMS20:
+            {
+                // Sallen-Key style 12 dB with a clipped resonance loop: aggressive, screaming peak that never blows up
+                float* st = sv[ch];
+                const float v3 = x - st[1];
+                const float v1 = a1 * st[0] + a2 * v3;
+                const float v2 = st[1] + a2 * st[0] + a3 * v3;
+                st[0] = 2.0f * v1 - st[0]; st[1] = 2.0f * v2 - st[1];
+                st[0] = 1.6f * fastTanh (st[0] * 0.625f);
+                return v2 * (1.0f + 0.4f * (2.0f - ks));
             }
             case fCombP: case fCombN:
             {
@@ -271,6 +319,7 @@ struct Shared
 {
     const Patch* p = nullptr;
     float fs = 48000, invFs = 1.0f / 48000;
+    float mipFs = 48000;     // oscillators are band-limited for the OUTPUT rate, so oversampled drive / filters have headroom
     EnvCoef ec[3];
     float bendSemis = 0, bendNorm = 0, modWheel = 0, aftertouch = 0;
     float glideCoef = 1;
@@ -324,7 +373,9 @@ public:
         note = n; vel = v; age = a; active = true; gate = true; sustained = false; killing = false; killGain = 1.0f;
         targetPitch = (float) n;
         curPitch = glideFrom ? fromPitch : (float) n;
-        noteRand = rg.uni();
+        noteRand = rg.uni(); noteRand2 = rg.uni();
+        tolGain = 1.0f + 0.06f * rg.bip(); tolBias = 0.04f * rg.bip();
+        for (auto& oo : driftV) for (auto& dv : oo) { dv.fixed = rg.bip(); if (! wasActive) { dv.v = rg.bip(); dv.target = rg.bip(); dv.left = 0; } }
         for (int e = 0; e < 3; ++e) { env[e].c = &sh.ec[e]; if (! wasActive) env[e].v = 0; env[e].on(); }
         const Patch& p = *sh.p;
         for (int o = 0; o < kOsc; ++o)
@@ -344,7 +395,9 @@ public:
                 if (p.flt[f].type == fCombP || p.flt[f].type == fCombN) filt[f].resetComb();
             }
             for (auto& x : fmOut) x = 0.0f;
+            for (auto& o : osc) for (auto& c : o.hpS) c[0] = c[1] = 0.0f;
             noiseLp = noiseLp2 = 0.0f;
+            warmDc[0] = warmDc[1] = warmY[0] = warmY[1] = 0.0f;
         }
         firstTick = true;
         tick (sh);
@@ -421,13 +474,42 @@ public:
             const float spread = 1.2f * det * std::sqrt (det);
             const float width = std::clamp (op.width + d[dWidth], 0.0f, 1.0f);
             float sumSq = 0.0f;
+            // stack intervals: unison voices are spread over octaves / fifths / chord tones
+            static const int stacks[7][4] { { 0 }, { 0 }, { 0, 12 }, { 0, 7, 12 }, { 0, 7 }, { 0, 4, 7, 12 }, { 0, 3, 7, 12 } };
+            static const int stackN[7] { 1, 1, 2, 3, 2, 4, 4 };
+            const int um = std::clamp (op.umode, 0, 6), sn = stackN[um];
+            const float drift = sh.p->drift;
+            const int groups = sn > 1 ? (n + sn - 1) / sn : n;
             for (int j = 0; j < n; ++j)
             {
-                const float x = n == 1 ? 0.0f : 2.0f * (float) j / (float) (n - 1) - 1.0f;
-                const float off = spread * x * (0.55f + 0.45f * std::fabs (x));
+                // stacks: voices of one interval group share a stereo / detune position, so every interval is heard on both sides
+                const int gi = sn > 1 ? j / sn : j;
+                const float x = groups <= 1 ? 0.0f : 2.0f * (float) gi / (float) (groups - 1) - 1.0f;
+                float off;
+                if (um == uSuper)
+                {
+                    // Roland JP-8000 super saw (Adam Szabo's measurements): fixed uneven voice offsets scaled by the
+                    // measured 11th-order detune curve -> the classic trance / big room sound
+                    static const float jp[7] { -0.11002313f, -0.06288439f, -0.01952356f, 0.0f, 0.01991221f, 0.06216538f, 0.10745242f };
+                    const float fx = (x + 1.0f) * 3.0f; const int i0 = std::min (5, (int) fx); const float fr = fx - (float) i0;
+                    const float c = jp[i0] + (jp[i0 + 1] - jp[i0]) * fr;
+                    off = 12.0f * std::log2 (std::max (0.05f, 1.0f + c * jpDetune (det)));
+                }
+                else off = spread * x * (0.55f + 0.45f * std::fabs (x));
+                if (sn > 1) off += (float) stacks[um][j % sn];
+                // analog drift: slow random wander per unison voice + a fixed per-note offset
+                if (drift > 0.0f)
+                {
+                    auto& dr = driftV[o][j];
+                    if (--dr.left <= 0) { dr.target = rng.bip(); dr.left = 150 + (int) (rng.uni() * 600.0f); }
+                    dr.v += (dr.target - dr.v) * 0.004f;
+                    off += drift * (0.14f * dr.v + 0.06f * dr.fixed);
+                }
                 uni[o][j].inc = freq * std::exp2 (off / 12.0f) * sh.invFs;
-                const bool centre = n == 1 || std::fabs (x) < (n % 2 ? 0.01f : 1.01f / (float) (n - 1));
-                const float gg = centre ? 1.0f : op.blend;
+                const bool centre = groups <= 1 || std::fabs (x) < (groups % 2 ? 0.01f : 1.01f / (float) (groups - 1));
+                // JP mix curves: the centre saw fades as the side saws come up (keeps the level constant)
+                const float gg = um == uSuper ? (centre ? -0.55366f * op.blend + 0.99785f : -0.73764f * op.blend * op.blend + 1.2841f * op.blend + 0.044372f)
+                                              : (centre ? 1.0f : op.blend);
                 const float pan = std::clamp (op.pan + d[base + 5] + d[dPan] + x * width, -1.0f, 1.0f);
                 const float ang = (pan + 1.0f) * 0.25f * kPiS;
                 uni[o][j].gl = gg * std::cos (ang) * 1.41421356f;
@@ -437,6 +519,12 @@ public:
             }
             os.norm = 1.0f / std::sqrt (std::max (sumSq, 1.0e-6f));
             os.tbl = op.tbl;
+            os.hpOn = um == uSuper;
+            if (os.hpOn)
+            {
+                const float gH = std::tan (kPiS * std::min (freq, 0.45f * sh.fs) * sh.invFs);
+                os.hpA1 = 1.0f / (1.0f + gH * (gH + 1.41421356f)); os.hpA2 = gH * os.hpA1; os.hpA3 = gH * os.hpA2;
+            }
             const int F = op.tbl->frames;
             const float pos = std::clamp (op.pos + d[base + 0], 0.0f, 1.0f);
             const float fp = pos * (float) (F - 1);
@@ -445,7 +533,7 @@ public:
             os.f1 = F > 1 ? os.f0 + 1 : os.f0;
             os.warpMode = op.warpMode;
             os.warp = std::clamp (op.warp + d[base + 4], 0.0f, 1.0f);
-            float bwMul = std::exp2 (spread / 12.0f);
+            float bwMul = um == uSuper ? 1.0f + 0.11f * jpDetune (det) : std::exp2 (spread / 12.0f);
             switch (os.warpMode)
             {
                 case wSync:     bwMul *= 1.0f + 7.0f * os.warp; break;
@@ -457,7 +545,7 @@ public:
                 case wRemap:    bwMul *= 1.0f + 2.0f * os.warp; break;
                 default: break;
             }
-            os.mip = Table::mipFor (freq * bwMul, sh.fs);
+            os.mip = Table::mipFor (freq * bwMul, sh.mipFs);
             os.sqW = 0.5f - 0.48f * os.warp;
             os.bendA = 8.0f * os.warp;
             os.asymA = (2.0f * os.warp - 1.0f) * 8.0f;
@@ -483,10 +571,16 @@ public:
             fltOn[f] = fp.on;
             if (! fp.on) continue;
             const float envAmt = fp.env + (f == 0 ? d[dFltEnv] : 0.0f);
-            const float oct = envAmt * 8.0f * env[1].v + fp.key * ((float) note - 60.0f) / 12.0f + 8.0f * d[f == 0 ? dCutoff : dF2Cut];
+            const float oct = envAmt * 8.0f * env[1].v + fp.key * ((float) note - 60.0f) / 12.0f + 8.0f * d[f == 0 ? dCutoff : dF2Cut]
+                            + sh.p->drift * 0.3f * (noteRand2 * 2.0f - 1.0f);
             filt[f].set (fp.type, fp.cutoff * std::exp2 (oct), fp.res + d[f == 0 ? dRes : dF2Res], fp.drive + (f == 0 ? d[dDrive] : 0.0f), sh.fs);
         }
         route = p.route;
+
+        warmK = std::clamp (p.warmth, 0.0f, 1.0f);
+        warmDrive = 0.6f + 2.4f * warmK;
+        warmBias = (0.12f + tolBias) * warmK;
+        warmMakeup = 1.0f / std::max (0.2f, fastTanh (warmDrive * 0.7f) / 0.7f);
 
         const float velG = 1.0f - p.velSens * (1.0f - vel * vel);
         setRamp (gainSm, gainInc, velG * std::clamp (volMul, 0.0f, 2.0f));
@@ -546,6 +640,17 @@ public:
                     ol += s * u.gl; orr += s * u.gr; om += s * u.gm;
                 }
                 const float gg = os.norm * os.level;
+                if (os.hpOn)
+                {
+                    // 12 dB high-pass at the fundamental (TPT SVF, per channel)
+                    auto hpf = [&] (float x, float* st)
+                    {
+                        const float v3 = x - st[1], v1 = os.hpA1 * st[0] + os.hpA2 * v3, v2 = st[1] + os.hpA2 * st[0] + os.hpA3 * v3;
+                        st[0] = 2.0f * v1 - st[0]; st[1] = 2.0f * v2 - st[1];
+                        return x - 1.41421356f * v1 - v2;
+                    };
+                    ol = hpf (ol, os.hpS[0]); orr = hpf (orr, os.hpS[1]);
+                }
                 l += ol * gg; r += orr * gg;
                 fmOut[o] = om * os.norm;
             }
@@ -595,6 +700,20 @@ public:
                 }
             }
 
+            if (warmK > 0.0f)
+            {
+                // analog voice stage: VCA-style asymmetric soft saturation (even + odd harmonics) with DC blocking
+                auto warm = [&] (float x, int c)
+                {
+                    const float u = x * warmDrive * tolGain + warmBias;
+                    const float y = fastTanh (u) - fastTanh (warmBias);
+                    const float o = x + warmK * (y * warmMakeup - x);
+                    const float d = o - warmDc[c] + 0.9995f * warmY[c]; warmDc[c] = o; warmY[c] = d;
+                    return d;
+                };
+                l = warm (l, 0); r = warm (r, 1);
+            }
+
             const float a = env[0].next();
             env[1].next(); env[2].next();
             gainSm += gainInc;
@@ -619,6 +738,7 @@ private:
         const Table* tbl = nullptr;
         float ff = 0, norm = 1, warp = 0, sqW = 0.5f, bendA = 0, asymA = 0, qSteps = 256, syncEnd = 0;
         float level = 0, levelInc = 0;
+        bool hpOn = false; float hpA1 = 0, hpA2 = 0, hpA3 = 0, hpS[2][2] {};
     };
 
     void setRamp (float& v, float& inc, float target) noexcept
@@ -634,12 +754,15 @@ private:
     Rng rng;
     float lastDst[kNumDst] {};
     float lfoPh[kLfo] {}, shA[kLfo] {}, shB[kLfo] {}, lastGlobal[kLfo] {};
-    float targetPitch = 60, noteRand = 0;
+    float targetPitch = 60, noteRand = 0, noteRand2 = 0;
+    struct Drift { float v = 0, target = 0, fixed = 0; int left = 0; };
+    Drift driftV[kOsc][kMaxUni];
     float subPh = 0, subInc = 0, subLevel = 0, subLevelInc = 0;
     float noiseLevel = 0, noiseLevelInc = 0, noiseColor = 0.5f, noiseLp = 0, noiseLp2 = 0, noiseA = 0.1f, noiseA2 = 0.4f;
     float gainSm = 1, gainInc = 0;
     float fmOut[kOsc] {};
     float killGain = 1, killStep = 0.01f;
+    float tolGain = 1, tolBias = 0, warmK = 0, warmDrive = 1, warmBias = 0, warmMakeup = 1, warmDc[2] {}, warmY[2] {};
     bool fltOn[2] { true, false }, firstTick = true;
     int route = 0;
 };
@@ -648,9 +771,10 @@ private:
 class Engine
 {
 public:
-    void prepare (double sampleRate)
+    void prepare (double sampleRate, double outputRate = 0.0)
     {
         sh.fs = (float) sampleRate; sh.invFs = 1.0f / sh.fs;
+        sh.mipFs = (float) (outputRate > 0.0 ? outputRate : sampleRate);
         (void) WavetableBank::get();
         for (int i = 0; i < kPool; ++i) { voices[i].clear(); voices[i].seed (0x1234567u + 7919u * (uint32_t) i); }
         tickLeft = 0; lastPitch = -1.0f; stackN = 0;

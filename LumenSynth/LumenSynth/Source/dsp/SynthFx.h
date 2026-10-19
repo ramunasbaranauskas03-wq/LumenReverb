@@ -5,6 +5,8 @@
 #include "PumpEngine.h"     // SVFp, LR4
 #include <cmath>
 #include <algorithm>
+#include <memory>
+#include <juce_dsp/juce_dsp.h>
 
 namespace lumen::synth
 {
@@ -93,10 +95,16 @@ struct Biquad
 class Distortion
 {
 public:
+    // 8x oversampled (polyphase half-band IIR) so heavy drive stays clean instead of turning into digital fizz
     void prepare (float fs_)
     {
         fs = fs_;
-        for (int c = 0; c < 2; ++c) { for (auto& f : up[c]) { f.set (0.21f * 2.0f * fs, 2.0f * fs); f.reset(); } for (auto& f : dn[c]) { f.set (0.21f * 2.0f * fs, 2.0f * fs); f.reset(); } }
+        os = std::make_unique<juce::dsp::Oversampling<float>> (2, 3, juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR, true, false);
+        os->initProcessing ((size_t) kBlock);
+        os->reset();
+        lat = juce::jlimit (0, kDry - 1, (int) std::lround (os->getLatencyInSamples()));
+        for (auto& d : dry) std::fill (std::begin (d), std::end (d), 0.0f);
+        dryPos = 0;
         holdN = 0; held[0] = held[1] = 0; dcx[0] = dcx[1] = dcy[0] = dcy[1] = 0;
     }
     void process (float* L, float* R, int n, int mode, float drive, float mix) noexcept
@@ -117,22 +125,34 @@ public:
             }
             return;
         }
-        for (int c = 0; c < 2; ++c)
-            for (int i = 0; i < n; ++i)
+        for (int off = 0; off < n; off += kBlock)
+        {
+            const int len = std::min (kBlock, n - off);
+            float tmp[2][kBlock];
+            for (int c = 0; c < 2; ++c) std::copy (ch[c] + off, ch[c] + off + len, tmp[c]);
+            float* tp[2] { tmp[0], tmp[1] };
+            juce::dsp::AudioBlock<float> blk (tp, 2, (size_t) len);
+            auto up = os->processSamplesUp (blk);
+            for (size_t c = 0; c < 2; ++c)
             {
-                const float x = ch[c][i];
-                float y = 0.0f;
-                for (int k = 0; k < 2; ++k)
-                {
-                    float u = k == 0 ? 2.0f * x : 0.0f, lo, hi;
-                    up[c][0].process (u, lo, hi); up[c][1].process (lo, u, hi);
-                    float s = shape (u * g, mode);
-                    dn[c][0].process (s, lo, hi); dn[c][1].process (lo, s, hi);
-                    if (k == 0) y = s;
-                }
-                const float d = y - dcx[c] + 0.9995f * dcy[c]; dcx[c] = y; dcy[c] = d;
-                ch[c][i] = dryG * x + wetG * d * comp;
+                float* d = up.getChannelPointer (c);
+                for (size_t i = 0; i < up.getNumSamples(); ++i) d[i] = shape (d[i] * g, mode);
             }
+            os->processSamplesDown (blk);
+            for (int i = 0; i < len; ++i)
+            {
+                for (int c = 0; c < 2; ++c)
+                {
+                    // dry path delayed by the oversampler's latency so the mix doesn't comb-filter
+                    dry[c][dryPos] = ch[c][off + i];
+                    const float x = dry[c][(dryPos - lat + kDry) % kDry];
+                    const float y = tmp[c][i];
+                    const float dd = y - dcx[c] + 0.9995f * dcy[c]; dcx[c] = y; dcy[c] = dd;
+                    ch[c][off + i] = dryG * x + wetG * dd * comp;
+                }
+                dryPos = (dryPos + 1) % kDry;
+            }
+        }
     }
 private:
     static inline float shape (float x, int mode) noexcept
@@ -145,8 +165,10 @@ private:
             default: return x;
         }
     }
+    static constexpr int kBlock = 256, kDry = 64;
     float fs = 48000;
-    SVFp up[2][2], dn[2][2];
+    std::unique_ptr<juce::dsp::Oversampling<float>> os;
+    float dry[2][kDry] {}; int dryPos = 0, lat = 0;
     float held[2] {}, dcx[2] {}, dcy[2] {};
     int holdN = 0;
 };

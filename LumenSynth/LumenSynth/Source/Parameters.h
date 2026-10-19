@@ -8,15 +8,18 @@
 namespace lumen::synth
 {
 
-constexpr int kNumOsc = 3, kNumLfo = 4, kNumSlots = 16, kNumFactoryTables = 12;
+constexpr int kNumOsc = 3, kNumLfo = 4, kNumSlots = 16, kNumFactoryTables = 22;
 
 inline const juce::StringArray& tableNames()
 { static const juce::StringArray s { "Basic Shapes", "Saw Stack", "PWM", "Vox Formant", "Hard Sync", "FM Growl", "Phase Res", "Organ", "Fold",
-                                     "Spectral", "Dirty Saw", "Metal FM", "User WT" }; return s; }
+                                     "Spectral", "Dirty Saw", "Metal FM",
+                                     "Analog Saw", "Acid", "Analog Pulse", "Neuro Grind", "DX Bells", "Choir", "Digital Crush", "Sub Harmonics", "Screech Sync", "Square Stack",
+                                     "User WT" }; return s; }
 inline const juce::StringArray& warpNames()   { static const juce::StringArray s { "Off", "Sync", "Bend", "Squeeze", "FM <", "Mirror", "Asym", "Quantize", "Remap" }; return s; }
 inline const juce::StringArray& subShapes()   { static const juce::StringArray s { "Sine", "Triangle", "Saw", "Square" }; return s; }
 inline const juce::StringArray& subOcts()     { static const juce::StringArray s { "-2 Oct", "-1 Oct", "0 Oct" }; return s; }
-inline const juce::StringArray& filterTypes() { static const juce::StringArray s { "Ladder LP24", "LP12", "LP24", "HP12", "HP24", "Band", "Notch", "Comb +", "Comb -", "Formant", "Phaser" }; return s; }
+inline const juce::StringArray& filterTypes() { static const juce::StringArray s { "Ladder LP24", "LP12", "LP24", "HP12", "HP24", "Band", "Notch", "Comb +", "Comb -", "Formant", "Phaser", "MS-20", "Diode 303", "Juno LP24" }; return s; }
+inline const juce::StringArray& uniModes()    { static const juce::StringArray s { "Classic", "Super", "Oct", "Oct+5", "5th", "Major", "Minor" }; return s; }
 inline const juce::StringArray& routeNames()  { static const juce::StringArray s { "Serial", "Parallel" }; return s; }
 inline const juce::StringArray& lfoShapes()   { static const juce::StringArray s { "Sine", "Triangle", "Saw Up", "Saw Down", "Square", "Pump", "S&H", "Smooth Rnd", "Custom" }; return s; }
 inline const juce::StringArray& lfoModes()    { static const juce::StringArray s { "Free", "Retrig", "Envelope" }; return s; }
@@ -93,6 +96,7 @@ inline const std::vector<Spec>& specs()
             F (o + "_blend",  N + "Blend", 0, 1, 0.75f);
             F (o + "_width",  N + "Width", 0, 1, 0.8f);
             F (o + "_rand",   N + "Phase Rand", 0, 1, 1);
+            C (o + "_umode",  N + "Unison Mode", uniModes(), 0);
         }
         B ("sub_on", "Sub On", false);
         C ("sub_shape", "Sub Shape", subShapes(), 0);
@@ -152,7 +156,9 @@ inline const std::vector<Spec>& specs()
         F ("glide", "Glide", 0, 2, 0, 0.25f, "s");
         I ("bend", "Bend Range", 0, 24, 2);
         F ("velsens", "Velocity", 0, 1, 0.5f);
-        B ("hq", "HQ Mode", false);
+        B ("hq", "HQ Mode", true);
+        F ("drift", "Analog Drift", 0, 1, 0);
+        F ("warmth", "Analog Warmth", 0, 1, 0.3f);
 
         B ("arp_on", "Arp On", false);
         C ("arp_mode", "Arp Mode", arpModes(), 0);

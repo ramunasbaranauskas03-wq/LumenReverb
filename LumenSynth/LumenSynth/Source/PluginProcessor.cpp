@@ -37,7 +37,7 @@ void LumenSynthProcessor::prepareToPlay (double sampleRate, int)
 {
     baseRate = sampleRate;
     engineFactor = P ("hq") > 0.5f ? 2 : 1;
-    engine.prepare (sampleRate * engineFactor);
+    engine.prepare (sampleRate * engineFactor, sampleRate);
     fx.prepare (sampleRate, kChunk);
     decim.reset();
     arp.prepare (sampleRate);
@@ -62,7 +62,7 @@ void LumenSynthProcessor::fillPatch()
         op.pos = g ("pos"); op.warpMode = (int) g ("warpm"); op.warp = g ("warp");
         op.oct = (int) std::lround (g ("oct")); op.semi = (int) std::lround (g ("semi")); op.fine = g ("fine");
         op.level = g ("level"); op.pan = g ("pan"); op.uni = (int) std::lround (g ("uni"));
-        op.det = g ("det"); op.blend = g ("blend"); op.width = g ("width"); op.rand = g ("rand");
+        op.det = g ("det"); op.blend = g ("blend"); op.width = g ("width"); op.rand = g ("rand"); op.umode = (int) g ("umode");
     }
     patch.subOn = P ("sub_on") > 0.5f; patch.subShape = (int) P ("sub_shape"); patch.subOct = (int) P ("sub_oct"); patch.subLevel = P ("sub_level");
     patch.noiseOn = P ("noise_on") > 0.5f; patch.noiseLevel = P ("noise_level"); patch.noiseColor = P ("noise_color");
@@ -93,7 +93,7 @@ void LumenSynthProcessor::fillPatch()
     static const char* macroIds[4] = { "macro1", "macro2", "macro3", "macro4" };
     for (int m = 0; m < 4; ++m) patch.macro[m] = P (macroIds[m]);
     patch.voices = (int) std::lround (P ("voices")); patch.legato = P ("legato") > 0.5f; patch.glide = P ("glide");
-    patch.bend = (int) std::lround (P ("bend")); patch.velSens = P ("velsens");
+    patch.bend = (int) std::lround (P ("bend")); patch.velSens = P ("velsens"); patch.drift = P ("drift"); patch.warmth = P ("warmth");
 
     fxp.hypOn = P ("hyp_on") > 0.5f; fxp.hypDetune = P ("hyp_detune"); fxp.hypDim = P ("hyp_dim"); fxp.hypMix = P ("hyp_mix");
     fxp.distOn = P ("dist_on") > 0.5f; fxp.distMode = (int) P ("dist_mode"); fxp.distDrive = P ("dist_drive"); fxp.distMix = P ("dist_mix");
@@ -171,7 +171,7 @@ void LumenSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
     hostBpm.store ((float) bpm, std::memory_order_relaxed);
 
     const int factor = P ("hq") > 0.5f ? 2 : 1;
-    if (factor != engineFactor) { engineFactor = factor; engine.prepare (baseRate * factor); decim.reset(); }
+    if (factor != engineFactor) { engineFactor = factor; engine.prepare (baseRate * factor, baseRate); decim.reset(); }
     engine.setPatch (patch);
     engine.setTransport (bpm, playing, ppq);
     engine.beginBlock();
@@ -239,7 +239,7 @@ bool LumenSynthProcessor::loadWavetableFile (int osc, const juce::File& f, juce:
     juce::AudioFormatManager fm; fm.registerBasicFormats();
     std::unique_ptr<juce::AudioFormatReader> reader (fm.createReaderFor (f));
     if (reader == nullptr) { error = "Can't read this file (use WAV/AIFF/FLAC)"; return false; }
-    const auto len = (int) juce::jmin<juce::int64> (reader->lengthInSamples, 256 * 2048 * 2);
+    const auto len = (int) std::min<juce::int64> (reader->lengthInSamples, 256 * 2048 * 2);
     if (len < 16) { error = "File is empty"; return false; }
     juce::AudioBuffer<float> buf ((int) juce::jmax (1u, reader->numChannels), len);
     reader->read (&buf, 0, len, 0, true, true);
@@ -427,6 +427,7 @@ void LumenSynthProcessor::loadPreset (int index)
     applyValues (p[(size_t) index].v, true);
     presetName = p[(size_t) index].name;
     presetCategory = p[(size_t) index].category;
+    for (int m = 0; m < 4; ++m) macroNames[m] = p[(size_t) index].macros[m].isNotEmpty() ? p[(size_t) index].macros[m] : "MACRO " + juce::String (m + 1);
     ++presetVersion;
 }
 
@@ -549,6 +550,7 @@ void LumenSynthProcessor::writeExtras (juce::ValueTree& vt) const
     ex.setProperty ("presetName", presetName, nullptr);
     ex.setProperty ("presetCategory", presetCategory, nullptr);
     ex.setProperty ("presetIndex", currentPreset, nullptr);
+    { juce::StringArray mn; for (auto& m : macroNames) mn.add (m); ex.setProperty ("macroNames", mn.joinIntoString ("|"), nullptr); }
     juce::StringArray ord;
     for (int i = 0; i < kNumFx; ++i) ord.add (juce::String (fxOrder[i].load()));
     ex.setProperty ("fxOrder", ord.joinIntoString (","), nullptr);
@@ -587,6 +589,10 @@ void LumenSynthProcessor::readExtras (const juce::ValueTree& vt)
     presetName = ex.getProperty ("presetName", "Init Saw").toString();
     presetCategory = ex.getProperty ("presetCategory", "Lead").toString();
     currentPreset = (int) ex.getProperty ("presetIndex", 0);
+    {
+        auto mn = juce::StringArray::fromTokens (ex.getProperty ("macroNames", "").toString(), "|", "");
+        for (int m = 0; m < 4; ++m) macroNames[m] = m < mn.size() && mn[m].isNotEmpty() ? mn[m] : "MACRO " + juce::String (m + 1);
+    }
     {
         auto ord = juce::StringArray::fromTokens (ex.getProperty ("fxOrder", "").toString(), ",", "");
         bool ok = ord.size() == kNumFx;

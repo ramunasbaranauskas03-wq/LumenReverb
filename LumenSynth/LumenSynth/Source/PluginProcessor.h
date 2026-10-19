@@ -143,6 +143,9 @@ private:
 
     int currentPreset = 0;
     juce::String presetName { "Init Saw" }, presetCategory { "Lead" };
+public:
+    juce::String macroNames[4] { "MACRO 1", "MACRO 2", "MACRO 3", "MACRO 4" };
+private:
     std::vector<juce::MemoryBlock> undoStack;
     juce::StringArray favourites;
 
