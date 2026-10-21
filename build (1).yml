@@ -1,0 +1,93 @@
+name: Build Lumen Plugins
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-latest]
+        plugin:
+          - { target: LumenReverb, product: "Lumen Reverb" }
+          - { target: LumenDelay, product: "Lumen Delay" }
+          - { target: LumenCompressor, product: "Lumen Compressor" }
+          - { target: LumenPump, product: "Lumen Pump" }
+          - { target: LumenLimiter, product: "Lumen Limiter" }
+          - { target: LumenBass, product: "Lumen Bass" }
+          - { target: LumenSaturator, product: "Lumen Saturator" }
+          - { target: LumenEQ, product: "Lumen EQ" }
+          - { target: LumenSynth, product: "Lumen Synth" }
+          - { target: LumenReference, product: "Lumen Reference" }
+          - { target: LumenFilter, product: "Lumen Filter" }
+          - { target: LumenSpaceControl, product: "Lumen Space Control" }
+          - { target: LumenTransient, product: "Lumen Transient" }
+          - { target: LumenClipper, product: "Lumen Clipper" }
+          - { target: LumenVocal, product: "Lumen Vocal" }
+          - { target: LumenOTT, product: "Lumen OTT" }
+          - { target: LumenMod, product: "Lumen Mod" }
+          - { target: LumenGate, product: "Lumen Gate" }
+          - { target: LumenMonoFilter, product: "Lumen MonoFilter" }
+          - { target: LumenResonance, product: "Lumen Resonance" }
+          - { target: LumenGlitch, product: "Lumen Glitch" }
+          - { target: LumenLoFi, product: "Lumen LoFi" }
+          - { target: LumenKick, product: "Lumen Kick Designer" }
+          - { target: LumenMeter, product: "Lumen Meter" }
+          - { target: LumenChord, product: "Lumen Chord" }
+          - { target: LumenRiser, product: "Lumen Riser" }
+          - { target: LumenMelody, product: "Lumen Melody Bass" }
+          - { target: LumenDrums, product: "Lumen Drums" }
+          - { target: LumenSampler, product: "Lumen Sampler" }
+          - { target: LumenMaster, product: "Lumen Master" }
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.plugin.target }} (${{ matrix.os }})
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Locate project
+        shell: bash
+        run: |
+          SRC=$(grep -rl --include=CMakeLists.txt "project(${{ matrix.plugin.target }} " . | head -1 | xargs -r dirname)
+          if [ -z "$SRC" ]; then echo "::error::${{ matrix.plugin.target }} not found in repo"; exit 1; fi
+          echo "Found project in $SRC"
+          echo "SRC=$SRC" >> "$GITHUB_ENV"
+
+      - name: Configure (macOS universal)
+        if: runner.os == 'macOS'
+        run: cmake -S "$SRC" -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+
+      - name: Configure (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: cmake -S "$SRC" -B build
+
+      - name: Build
+        run: cmake --build build --config Release --parallel 4
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          ART="build/${{ matrix.plugin.target }}_artefacts/Release"
+          mkdir -p dist
+          codesign --force --deep -s - "$ART/VST3/${{ matrix.plugin.product }}.vst3"
+          codesign --force --deep -s - "$ART/AU/${{ matrix.plugin.product }}.component"
+          cp -R "$ART/VST3/${{ matrix.plugin.product }}.vst3" dist/
+          cp -R "$ART/AU/${{ matrix.plugin.product }}.component" dist/
+          # zip keeps the executable bits macOS bundles need
+          ditto -c -k --keepParent dist "${{ matrix.plugin.target }}-macOS.zip"
+          rm -rf dist && mkdir dist && mv "${{ matrix.plugin.target }}-macOS.zip" dist/
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item -Recurse "build/${{ matrix.plugin.target }}_artefacts/Release/VST3/${{ matrix.plugin.product }}.vst3" dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.plugin.target }}-${{ runner.os }}
+          path: dist
