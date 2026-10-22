@@ -41,6 +41,7 @@ jobs:
           - { target: LumenDrums, product: "Lumen Drums" }
           - { target: LumenSampler, product: "Lumen Sampler" }
           - { target: LumenMaster, product: "Lumen Master" }
+          - { target: LumenSynthSampler, product: "Lumen Synth Sampler" }
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.plugin.target }} (${{ matrix.os }})
 
