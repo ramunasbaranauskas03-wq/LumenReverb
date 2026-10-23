@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.22)
 
 set(CMAKE_OSX_DEPLOYMENT_TARGET "10.13" CACHE STRING "Minimum macOS version")
-project(LumenEQ VERSION 1.0.0 LANGUAGES C CXX)
+project(LumenEQ VERSION 2.0.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -37,7 +37,7 @@ juce_add_plugin(LumenEQ
 target_sources(LumenEQ PRIVATE
     Source/PluginProcessor.cpp
     Source/PluginEditor.cpp
-    Source/dsp/Unmask.cpp)
+)
 
 target_include_directories(LumenEQ PRIVATE Source)
 
@@ -45,7 +45,12 @@ target_compile_definitions(LumenEQ PUBLIC
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
     JUCE_VST3_CAN_REPLACE_VST2=0
-    JUCE_DISPLAY_SPLASH_SCREEN=0)
+    JUCE_DISPLAY_SPLASH_SCREEN=0
+    _USE_MATH_DEFINES=1)
+
+if (MSVC)
+    target_compile_options(LumenEQ PRIVATE /bigobj /utf-8)
+endif()
 
 target_link_libraries(LumenEQ
     PRIVATE

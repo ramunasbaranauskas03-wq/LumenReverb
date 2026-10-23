@@ -1,29 +1,43 @@
-# Lumen EQ — Smart Dynamic EQ (VST3 / AU)
+# Lumen EQ 2 — Dynamic Linear-Phase EQ (VST3 / AU)
 
-![Lumen EQ](screenshot.png)
+Part of the Lumen series. A complete rewrite: 24 bands, analog-matched filters, per-band dynamics with side-chain, a linear-phase mode, EQ Match, Unmask and 32 EDM presets.
 
-A 6-band dynamic EQ with automatic unmasking, part of the Lumen series.
-
-## EQ
-- **6 bands:** Bell, Low Shelf, High Shelf, Low Cut, High Cut, Notch
-- Drag a dot on the graph to change frequency and gain; the mouse wheel changes Q. You can also use the **Freq / Gain / Q** knobs
-- A live **spectrum** of the track (cyan) with the **sidechain** spectrum overlaid (orange)
-- Accuracy: neutral = 0.000 dB; a +6 dB bell = +6.00 dB measured
+## Filters
+- **24 bands.** Double-click the graph to add a band. Drag to set frequency and gain. The mouse wheel sets Q. Alt-click deletes a band. Right-click opens the band menu.
+- **8 types:** Bell, Low Shelf, High Shelf, Low Cut, High Cut, Notch, Band Pass and Tilt.
+- **Slopes:** 6 / 12 / 18 / 24 / 36 / 48 / 72 / 96 dB/oct.
+- **Analog-matched design:** no "cramping" near Nyquist. A 16 kHz bell at 48 kHz matches the analog curve. In precise mode the numerator is fitted by least squares; while a band is moving, a fast design is used.
+- **Per-band channel:** Stereo, Mid, Side, Left or Right. For example, a Side low cut cleans the side channel below 100 Hz and leaves the mid untouched.
+- **Click-free automation:** parameters glide logarithmically in 16-sample steps. A +18 dB jump produces no click.
 
 ## Dynamic bands
-- **Dyn Range** (−24…+24 dB): how much the band moves. Negative cuts when the signal goes over the threshold; positive boosts
-- **Threshold** and a **Detector** per band: **Internal** (the track itself, e.g. de-essing or taming resonances) or **Sidechain** (another track, e.g. the kick)
-- **Attack / Release** are shared by all bands
-- The graph shows the dynamic movement live (an orange line from the static to the current gain)
+- **DYN RANGE** (±24 dB) and **THRESHOLD** per band. The curve on the graph moves live.
+- **SIDE-CHAIN DETECT:** the band reacts to another track. For example, the bass dips at 60 Hz only when the kick hits.
+- **ATTACK / RELEASE** are shared by all bands.
 
-## Smart Assist — UNMASK
-For example, carving the bass out of the kick's way:
-1. Put Lumen EQ on the **bass**, and route the **kick** to the sidechain (Ableton: expand **Sidechain** in the device header, then **Audio From** = Kick).
-2. Play a section with both and press **UNMASK**.
-3. Over 4 s it compares both spectra (1/6-octave), finds where they clash (up to 3 places) and sets free bands to **dynamic cuts driven by the sidechain**: the bass is cut there **only when the kick hits**, and keeps its full body between hits.
-4. **UNDO** restores the previous settings.
+## Modes
+- **Zero Latency:** IIR, about 1.2 % CPU with 12 bands.
+- **Linear Phase:** a 2x2 FIR matrix, so L/R and M/S stay exact. Low / Medium / High quality. Medium has 4608 samples of latency at 48 kHz, which the DAW compensates. About 3 % CPU.
 
-Test: with a 55 Hz bass and a kick, UNMASK found 60 Hz (−8.3 dB) and 120 Hz (−4.1 dB); during the kick the 60 Hz band cut 7.2 dB live.
+## Smart tools
+- **EQ MATCH:** captures 8 s of audio and matches its tonal balance to a reference file or to the side-chain track, using up to 10 bands.
+- **UNMASK:** finds where the track clashes with the side-chain (e.g. bass vs. kick) and creates dynamic cuts driven by the side-chain.
+- **Collision zones:** red areas on the graph show where the track and the side-chain clash.
+- **AUTO GAIN** keeps the loudness level matched for honest A/B comparisons. **GAIN SCALE** scales all band gains from −200 % to +200 % (negative = inverted).
+- **A/B** comparison, **COPY**, band **SOLO**, and a PRE / POST / SC analyzer with a +4.5 dB/oct tilt.
+
+## 32 EDM presets
+Kick, Sub, Bass (Reese, 808, Duck Under Kick, Future Bass), Lead (Supersaw, Festival), Pluck, Pad, Chords, Arp, Keys, Vocals (Pop Air, Backing, De-Esser, Telephone), Snare, Clap, Hats (dynamic), Perc, Drum Bus, FX (Riser, Downlifter), Master (Linear) and Mix Bus.
 
 ## Tested
-- pluginval strictest level: **SUCCESS**
+- DSP tests, all passed:
+  - Bit-transparent with no bands.
+  - Bell and shelf accuracy.
+  - Low cut at 96 dB/oct.
+  - Mid/Side separation.
+  - Symmetric linear-phase impulse.
+  - Dynamics, side-chain, glide, Auto Gain, EQ Match, Unmask and all 32 presets.
+- pluginval at strictness level 10: **SUCCESS**.
+- Strict GCC and Clang builds.
+
+Note: v2 uses new parameters, so Lumen EQ v1 settings in old projects will not carry over.
