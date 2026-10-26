@@ -3,16 +3,27 @@ name: Build Lumen Plugins
 on:
   push:
   workflow_dispatch:
+    inputs:
+      macos:
+        description: "Also build the macOS versions (VST3 + AU)"
+        type: boolean
+        default: false
+
+# a new upload cancels the build that is still running -> no queue pile-ups
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, windows-latest]
+        # every upload: Windows only (fast).  macOS: Actions -> Build Lumen Plugins -> Run workflow -> tick 'macOS'
+        os: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.macos && '["macos-14", "windows-latest"]' || '["windows-latest"]') }}
         plugin:
           - { target: LumenReverb, product: "Lumen Reverb" }
-          - { target: LumenDelay,  product: "Lumen Delay" }
+          - { target: LumenDelay, product: "Lumen Delay" }
           - { target: LumenCompressor, product: "Lumen Compressor" }
           - { target: LumenPump, product: "Lumen Pump" }
           - { target: LumenLimiter, product: "Lumen Limiter" }
