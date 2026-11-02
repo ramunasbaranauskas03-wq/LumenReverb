@@ -54,6 +54,7 @@ jobs:
           - { target: LumenMaster, product: "Lumen Master" }
           - { target: LumenSynthSampler, product: "Lumen Synth Sampler" }
           - { target: LumenMixCheck, product: "Lumen MixCheck" }
+          - { target: LumenSynthXL, product: "Lumen Synth XL" }
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.plugin.target }} (${{ matrix.os }})
 
