@@ -154,6 +154,8 @@ inline juce::String freqText (float f)
     if (f >= 100.0f)  return juce::String (juce::roundToInt (f)) + " Hz";
     return juce::String (f, 1) + " Hz";
 }
-inline float powToDb (float p) { return 10.0f * std::log10 (p + 1.0e-14f); }
+constexpr float kSilenceDb = -200.0f;   // shown as -inf
+constexpr float kGatePow   = 1.0e-11f;  // -110 dBFS: below this a point counts as digital silence
+inline float powToDb (float p) { return p < kGatePow ? kSilenceDb : 10.0f * std::log10 (p); }
 inline float dbToPow (float d) { return std::pow (10.0f, d * 0.1f); }
 } // namespace lumen::spec

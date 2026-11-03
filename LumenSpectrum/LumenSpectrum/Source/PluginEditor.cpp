@@ -252,11 +252,13 @@ void LumenSpectrumEditor::gather()
         t.master = t.role == kRoleMaster;
         t.visible = self || hidden.count (t.uid) == 0;
         auto it = peakStore.find (t.uid);
-        if (it == peakStore.end()) { it = peakStore.emplace (t.uid, std::array<float, P> {}).first; it->second.fill (-140.0f); }
+        if (it == peakStore.end()) { it = peakStore.emplace (t.uid, std::array<float, P> {}).first; it->second.fill (kSilenceDb); }
         for (int k = 0; k < P; ++k)
         {
             t.db[k] = s.spec[k].load (std::memory_order_relaxed);
-            it->second[(size_t) k] = juce::jmax (t.db[k], it->second[(size_t) k] - 0.35f);
+            float hold = juce::jmax (t.db[k], it->second[(size_t) k] - 0.35f);
+            if (hold < -110.0f) hold = kSilenceDb;          // peak hold falls away fully in silence
+            it->second[(size_t) k] = hold;
             t.pk[k] = it->second[(size_t) k];
         }
         if (smoothR > 0) { smoothSpectrum (t.db, smoothR); smoothSpectrum (t.pk, smoothR); }
@@ -325,7 +327,7 @@ void LumenSpectrumEditor::computeDerived()
         if (t.visible)
             for (int k = 0; k < P; k += 2) mx = juce::jmax (mx, t.db[k] + tilt (pointFreq ((float) k)));
     for (int k = 0; k < P; k += 2) mx = juce::jmax (mx, mixDb[k] + tilt (pointFreq ((float) k)));
-    const float want = juce::jlimit (-60.0f, 24.0f, std::ceil ((mx + 4.0f) / 6.0f) * 6.0f);
+    const float want = juce::jlimit (-24.0f, 24.0f, std::ceil ((mx + 4.0f) / 6.0f) * 6.0f);
     displayTop = want > displayTop ? want : juce::jmax (want, displayTop - 0.25f);
 
     // ---- masking: pairs of instruments that are both loud where the mix is loud
@@ -897,7 +899,7 @@ void LumenSpectrumEditor::drawHover (juce::Graphics& g)
         g.setColour (row.c); g.fillEllipse (line.removeFromLeft (10).toFloat().withSizeKeepingCentre (7, 7));
         line.removeFromLeft (5);
         g.setColour (C::dim);
-        g.drawText (v == Ownership ? juce::String (juce::roundToInt (row.v)) + " %" : juce::String (row.v, 1) + " dB", line.removeFromRight (56), juce::Justification::right);
+        g.drawText (v == Ownership ? juce::String (juce::roundToInt (row.v)) + " %" : (row.v < -150.0f ? juce::String ("-inf") : juce::String (row.v, 1) + " dB"), line.removeFromRight (56), juce::Justification::right);
         g.setColour (C::text);
         g.drawText (row.n, line, juce::Justification::left);
     }

@@ -42,7 +42,7 @@ LumenSpectrumProcessor::LumenSpectrumProcessor()
     slotIndex = hub->claim();
     for (auto* id : { ids::role, ids::colour, ids::fft, ids::avg, ids::chan })
         apvts.addParameterListener (id, this);
-    snap.fill (-140.0f);
+    snap.fill (lumen::spec::kSilenceDb);
     refreshIdentity();
 }
 

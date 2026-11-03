@@ -53,7 +53,7 @@ class Hub : private juce::Thread
 public:
     Hub() : juce::Thread ("Lumen Spectrum analysis")
     {
-        for (auto& s : slots) for (auto& v : s.spec) v.store (-140.0f);
+        for (auto& s : slots) for (auto& v : s.spec) v.store (kSilenceDb);
         startThread (juce::Thread::Priority::low);
     }
     ~Hub() override { stopThread (3000); }
@@ -67,7 +67,7 @@ public:
             {
                 auto& s = slots[(size_t) i];
                 for (auto& ch : s.ring) std::fill (std::begin (ch), std::end (ch), 0.0f);
-                for (auto& v : s.spec) v.store (-140.0f);
+                for (auto& v : s.spec) v.store (kSilenceDb);
                 s.fresh = true;
                 s.uid.store (++uidCounter);
                 s.setName ("Track " + juce::String (i + 1));
