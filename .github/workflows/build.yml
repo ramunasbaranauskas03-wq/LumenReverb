@@ -1,11 +1,11 @@
-name: Build Lumen Plugins
+name: Build Lumen Plugins (macOS)
 
 on:
   push:
   workflow_dispatch:
     inputs:
-      macos:
-        description: "Also build the macOS versions (VST3 + AU)"
+      universal:
+        description: "Universal build (Apple Silicon + Intel Macs). Off = Apple Silicon only, faster"
         type: boolean
         default: false
 
@@ -19,8 +19,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # every upload: Windows only (fast).  macOS: Actions -> Build Lumen Plugins -> Run workflow -> tick 'macOS'
-        os: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.macos && '["macos-14", "windows-latest"]' || '["windows-latest"]') }}
         plugin:
           - { target: LumenReverb, product: "Lumen Reverb" }
           - { target: LumenDelay, product: "Lumen Delay" }
@@ -57,53 +55,97 @@ jobs:
           - { target: LumenSynthXL, product: "Lumen Synth XL" }
           - { target: LumenSpectrum, product: "Lumen Spectrum" }
           - { target: LumenReverse, product: "Lumen Reverse" }
-    runs-on: ${{ matrix.os }}
-    name: ${{ matrix.plugin.target }} (${{ matrix.os }})
+    runs-on: macos-15
+    name: ${{ matrix.plugin.target }}
+    env:
+      ARCHS: ${{ (github.event_name == 'workflow_dispatch' && inputs.universal) && 'arm64;x86_64' || 'arm64' }}
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Locate project
-        shell: bash
         run: |
-          SRC=$(grep -rl --include=CMakeLists.txt "project(${{ matrix.plugin.target }} " . | head -1 | xargs -r dirname)
+          SRC=$(grep -rl --include=CMakeLists.txt "project(${{ matrix.plugin.target }} " . | head -1 | xargs dirname)
           if [ -z "$SRC" ]; then echo "::error::${{ matrix.plugin.target }} not found in repo"; exit 1; fi
           echo "Found project in $SRC"
           echo "SRC=$SRC" >> "$GITHUB_ENV"
 
-      - name: Configure (macOS universal)
-        if: runner.os == 'macOS'
-        run: cmake -S "$SRC" -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
-
-      - name: Configure (Windows)
-        if: runner.os == 'Windows'
-        shell: bash
-        run: cmake -S "$SRC" -B build
+      - name: Configure
+        run: cmake -S "$SRC" -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="$ARCHS" -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
 
       - name: Build
         run: cmake --build build --config Release --parallel 4
 
-      - name: Package (macOS)
-        if: runner.os == 'macOS'
+      - name: Package
         run: |
           ART="build/${{ matrix.plugin.target }}_artefacts/Release"
-          mkdir -p dist
-          codesign --force --deep -s - "$ART/VST3/${{ matrix.plugin.product }}.vst3"
-          codesign --force --deep -s - "$ART/AU/${{ matrix.plugin.product }}.component"
-          cp -R "$ART/VST3/${{ matrix.plugin.product }}.vst3" dist/
-          cp -R "$ART/AU/${{ matrix.plugin.product }}.component" dist/
-          # zip keeps the executable bits macOS bundles need
-          ditto -c -k --keepParent dist "${{ matrix.plugin.target }}-macOS.zip"
-          rm -rf dist && mkdir dist && mv "${{ matrix.plugin.target }}-macOS.zip" dist/
+          mkdir -p "dist/VST3" "dist/Components"
+          cp -R "$ART/VST3/${{ matrix.plugin.product }}.vst3" dist/VST3/
+          cp -R "$ART/AU/${{ matrix.plugin.product }}.component" dist/Components/
+          codesign --force --deep -s - "dist/VST3/${{ matrix.plugin.product }}.vst3"
+          codesign --force --deep -s - "dist/Components/${{ matrix.plugin.product }}.component"
 
-      - name: Package (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
+      - name: Validate Audio Unit
         run: |
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item -Recurse "build/${{ matrix.plugin.target }}_artefacts/Release/VST3/${{ matrix.plugin.product }}.vst3" dist/
+          mkdir -p ~/Library/Audio/Plug-Ins/Components
+          cp -R dist/Components/*.component ~/Library/Audio/Plug-Ins/Components/
+          killall -9 AudioComponentRegistrar 2>/dev/null || true
+          sleep 3
+          LINE=$(auval -a 2>/dev/null | grep -i "Lmn\|Lumen" | grep -i "${{ matrix.plugin.product }}" | head -1 || true)
+          echo "$LINE"
+          if [ -n "$LINE" ]; then
+            set -- $LINE
+            auval -strict -v "$1" "$2" "$3" | tail -5 || echo "::warning::auval reported problems for ${{ matrix.plugin.product }}"
+          else
+            echo "::warning::${{ matrix.plugin.product }} AU not listed by auval"
+          fi
+
+      - name: Zip (keeps the executable bits macOS bundles need)
+        run: ditto -c -k dist "part-${{ matrix.plugin.target }}.zip"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.plugin.target }}-${{ runner.os }}
-          path: dist
+          name: part-${{ matrix.plugin.target }}
+          path: part-${{ matrix.plugin.target }}.zip
+          retention-days: 7
+
+  bundle:
+    needs: build
+    if: always()
+    runs-on: macos-15
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: part-*
+          path: parts
+          merge-multiple: true
+
+      - name: Make installer bundle
+        run: |
+          mkdir -p Lumen
+          for z in parts/*.zip; do ditto -x -k "$z" Lumen; done
+          cat > Lumen/Install.command <<'SH'
+          #!/bin/bash
+          # Installs every Lumen plugin for the current user and clears the download quarantine.
+          cd "$(dirname "$0")"
+          VST3="$HOME/Library/Audio/Plug-Ins/VST3"
+          AU="$HOME/Library/Audio/Plug-Ins/Components"
+          mkdir -p "$VST3" "$AU"
+          for p in VST3/*.vst3; do rm -rf "$VST3/$(basename "$p")"; cp -R "$p" "$VST3/"; done
+          for p in Components/*.component; do rm -rf "$AU/$(basename "$p")"; cp -R "$p" "$AU/"; done
+          xattr -dr com.apple.quarantine "$VST3"/Lumen*.vst3 "$AU"/Lumen*.component 2>/dev/null
+          killall -9 AudioComponentRegistrar 2>/dev/null
+          echo ""
+          echo "Installed $(ls -d VST3/*.vst3 | wc -l | tr -d ' ') Lumen plugins (VST3 + AU)."
+          echo "Open Ableton -> Settings -> Plug-Ins -> Rescan."
+          SH
+          chmod +x Lumen/Install.command
+          echo "Plugins in bundle: $(ls -d Lumen/VST3/*.vst3 | wc -l)"
+          ls Lumen/VST3
+          ditto -c -k --keepParent Lumen Lumen-macOS.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Lumen-ALL-macOS
+          path: Lumen-macOS.zip
+          retention-days: 30
